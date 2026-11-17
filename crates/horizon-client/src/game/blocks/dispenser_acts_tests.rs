@@ -17,14 +17,16 @@ impl Hooks for Everything {
         _: &mut dyn ServerHost,
         event: &mut DispenserActsEvent<'_>,
     ) -> Option<Dispensed> {
-        (event.stack.item().to_string() == "minecraft:stick" && event.facing == Direction::East)
-            .then(|| (None, 1001))
+        (mod_api::__private::item_key_id(event.stack.item()) == Some("minecraft:stick")
+            && event.facing == Direction::East)
+            .then_some((None, 1001))
     }
 }
 
 fn dispense(item: &str, count: u32) -> Option<ItemStack> {
     let mods: Mods = vec![ModEntry::new("everything", Box::new(Everything))].into();
     mod_platform::testing::with_mods(mods, || {
+        let mut result = None;
         crate::game::native_entity_refs::tests::with_game(|game: &mut Game<'_>| {
             game.options.dedicated = Some(Vec::new());
             game.world
@@ -33,9 +35,11 @@ fn dispense(item: &str, count: u32) -> Option<ItemStack> {
             game.native_lifecycle
                 .begin_open(mod_api::Authority::IntegratedServer);
             let at = (DISPENSER[0], DISPENSER[1], DISPENSER[2]);
-            game.dispense_item(at, Direction::East, ItemStack::new(item, count))
-                .unwrap()
-        })
+            result = game
+                .dispense_item(at, Direction::East, ItemStack::new(item, count))
+                .unwrap();
+        });
+        result
     })
 }
 
