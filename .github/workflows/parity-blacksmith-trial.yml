@@ -1,50 +1,34 @@
-name: parity blacksmith trial
-# Trial (2026-11-19): can a Blacksmith runner fetch the private, encrypted vanilla data (horizon-rust/vanilla-data)
-# and run a harness? Pushes to this branch only; never a pull request, so no fork's code ever sees the secrets.
-# Only the fetch step gets them (env:), and tools/ci/fetch-vanilla-data.sh removes them from disk before it ends.
+name: parity speed trial
+# Trial (2026-11-19, ci/parity-speed-trial): what caches make the hosted parity runs fast, measured on Blacksmith.
+# Pushes to this branch only; never a pull request, so no fork's code ever sees the secrets. The secrets go only to the
+# steps that run tools/ci/fetch-vanilla-data.sh or tools/ci/sealed-cache.sh. A cache entry may hold (i) files with no
+# game content, in the clear, or (ii) anything game-derived, but only sealed with the dataset's passphrase
+# (sealed-cache.sh). Every key starts with parity-speed-trial-.
 on:
   push:
-    branches: [ci/parity-blacksmith-trial]
+    branches: [ci/parity-speed-trial]
 permissions:
   contents: read
+env:
+  HORIZON_TELEMETRY_URL: "off"
+  # No compiler cache: what this trial caches is measured by itself.
+  HORIZON_NO_SCCACHE: "1"
+  CARGO_BUILD_JOBS: "16"
+  DATASET: 26.3-linux-x64
+  # The probe build folder is cached in the clear only once the differential check found no game content in it.
+  SAVE_CLEAR_TARGET: "false"
 
 jobs:
-  plumbing:
-    if: false # measured in run 44617266924 or earlier; only harness-client runs from here on
+  # Does a probe build hold anything made from the vanilla data? The same probes, built at the same path twice from
+  # scratch: first with no vanilla data on the runner at all, then after the fetch and the resource export. Every file
+  # that differs is listed by name; and no file of the second build may be byte-identical to a file of the data or of
+  # the prepared resources. Nothing is cached or uploaded.
+  differential:
     runs-on: blacksmith-16vcpu-ubuntu-2404
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Fetch the dummy payload
-        env:
-          VANILLA_DATA_DEPLOY_KEY: ${{ secrets.VANILLA_DATA_DEPLOY_KEY }}
-          VANILLA_DATA_PASSPHRASE: ${{ secrets.VANILLA_DATA_PASSPHRASE }}
-        run: bash tools/ci/fetch-vanilla-data.sh dummy "$RUNNER_TEMP/vanilla-dummy"
-      - name: The dummy's digest, and nothing of the secrets left
-        run: |
-          cd "$RUNNER_TEMP/vanilla-dummy" && sha256sum check.txt noise.bin
-          echo "secret variables in this step: $(env | grep -c '^VANILLA_DATA_' || true)"
-          echo "fetch folders left: $(find "$RUNNER_TEMP" -maxdepth 1 -name 'vanilla-fetch.*' | wc -l)"
-
-  # One real harness on the fetched data, as parity.yml runs it, each part timed. Cold on purpose: no sticky disk, no
-  # Actions cache. Everything game-derived stays in $RUNNER_TEMP (the data, the preparation) or the workspace (.local/
-  # links into it, the probe build in .local/parity-target, the harness's work folder in target/), and the runner
-  # is thrown away after the job. Nothing is uploaded.
-  harness:
-    if: false # measured in run 44617266924 or earlier; only harness-client runs from here on
-    runs-on: blacksmith-16vcpu-ubuntu-2404
-    timeout-minutes: 90
-    env:
-      HORIZON_TELEMETRY_URL: "off"
-      # No compiler cache: sccache's cache would outlive nothing here, and no cache may hold this job's output.
-      HORIZON_NO_SCCACHE: "1"
-      CARGO_BUILD_JOBS: "16"
+    timeout-minutes: 100
     steps:
       - name: Clock
         run: |
-          echo "SETUP_START=$(date +%s)" >> "$GITHUB_ENV"
           {
             echo "VANILLA=$RUNNER_TEMP/vanilla"
             echo "HORIZON_SHARED_SOURCE=$RUNNER_TEMP/vanilla/shared-local"
@@ -58,8 +42,6 @@ jobs:
         id: lock
         run: |
           echo "java=$(sed -n 's/.*"java_major": *\([0-9]*\).*/\1/p' research-lock.json | head -1)" >> "$GITHUB_OUTPUT"
-      # What tools/ci/linux-runner.sh installs on Ubuntu, less the screen (Xvfb, lavapipe: this harness draws
-      # nothing) and sccache.
       - name: Build packages
         run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends build-essential pkg-config cmake libasound2-dev libudev-dev > /dev/null
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -73,218 +55,143 @@ jobs:
         with:
           toolchain: stable
       - name: Tools from the runner
+        run: bash tools/ci/runner-env.sh
+      # Every probe build the harnesses make (parity.py's target folder and profile settings), and horizon-prepare.
+      - name: The builds script
         run: |
-          bash tools/ci/runner-env.sh
-          echo "runner setup $(( $(date +%s) - SETUP_START ))" >> "$RUNNER_TEMP/timings"
-      - name: Fetch the vanilla data
-        env:
-          VANILLA_DATA_DEPLOY_KEY: ${{ secrets.VANILLA_DATA_DEPLOY_KEY }}
-          VANILLA_DATA_PASSPHRASE: ${{ secrets.VANILLA_DATA_PASSPHRASE }}
-        run: |
-          start=$(date +%s)
-          bash tools/ci/fetch-vanilla-data.sh 26.3-linux-x64 "$HORIZON_SHARED_SOURCE"
-          echo "data fetch, decrypt, unpack $(( $(date +%s) - start ))" >> "$RUNNER_TEMP/timings"
-      # Built here first, so that vanilla-data.sh's own cargo build finds it done and its time is the export's.
-      - name: Build horizon-prepare
-        run: |
-          start=$(date +%s)
+          cat > "$RUNNER_TEMP/builds.sh" <<'EOF'
+          set -euo pipefail
           cargo build --release --locked -p horizon-prepare
-          echo "horizon-prepare build $(( $(date +%s) - start ))" >> "$RUNNER_TEMP/timings"
-      - name: Vanilla data, and resources prepared by this preparer
-        run: |
-          start=$(date +%s)
-          bash tools/ci/vanilla-data.sh
-          echo "resource export (vanilla-data.sh) $(( $(date +%s) - start ))" >> "$RUNNER_TEMP/timings"
-      # The probe, built first as parity.py builds it (its target folder and profile settings), so that the harness's
-      # own build finds it done.
-      - name: Build the probe
-        run: |
-          start=$(date +%s)
-          CARGO_TARGET_DIR="$PWD/.local/parity-target" CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
-            CARGO_PROFILE_RELEASE_INCREMENTAL=true CARGO_PROFILE_DEV_OPT_LEVEL=3 \
-            cargo build --locked --profile fast -p horizon-core --example paletted_fixture
-          echo "probe build $(( $(date +%s) - start ))" >> "$RUNNER_TEMP/timings"
-      - name: The harness
-        env:
-          PARITY_HOSTS: ''
-        run: |
-          start=$(date +%s)
-          python3 tools/parity.py paletted_container --timeout 1500
-          echo "harness (paletted_container) $(( $(date +%s) - start ))" >> "$RUNNER_TEMP/timings"
-      - name: Timings
-        if: always()
-        run: |
-          touch "$RUNNER_TEMP/timings"
-          {
-            echo "| Part | Seconds |"
-            echo "| --- | ---: |"
-            while read -r line; do echo "| ${line% *} | ${line##* } |"; done < "$RUNNER_TEMP/timings"
-            echo "| total, from the first step | $(( $(date +%s) - SETUP_START )) |"
-          } | tee -a "$GITHUB_STEP_SUMMARY"
-          echo "disk: vanilla $(du -sk "$VANILLA" | cut -f1) KiB, probe target $(du -sk .local/parity-target 2>/dev/null | cut -f1) KiB, target $(du -sk target 2>/dev/null | cut -f1) KiB"
-
-  # What a fuller run costs: 22 cheap server-side harnesses (horizon-world's world_probe and horizon-core probes; no
-  # sources, sounds or languages needed), on the same cold setup. parity.py --changed-files would pick every harness
-  # on a fresh runner (none has a record yet), so they are named.
-  harness-wider:
-    if: false # measured in run 44617266924 or earlier; only harness-client runs from here on
-    runs-on: blacksmith-16vcpu-ubuntu-2404
-    timeout-minutes: 45
-    env:
-      HORIZON_TELEMETRY_URL: "off"
-      # No compiler cache: sccache's cache would outlive nothing here, and no cache may hold this job's output.
-      HORIZON_NO_SCCACHE: "1"
-      CARGO_BUILD_JOBS: "16"
-      PARITY_LOCAL_JOBS: "8"
-      PARITY_MACHINE_JOBS: "8"
-    steps:
-      - name: Clock
-        run: |
-          echo "SETUP_START=$(date +%s)" >> "$GITHUB_ENV"
-          {
-            echo "VANILLA=$RUNNER_TEMP/vanilla"
-            echo "HORIZON_SHARED_SOURCE=$RUNNER_TEMP/vanilla/shared-local"
-            echo "HORIZON_PREPARED_CACHE=$RUNNER_TEMP/vanilla/prepared"
-            echo "PARITY_SHARED=$RUNNER_TEMP/vanilla/parity-shared"
-          } >> "$GITHUB_ENV"
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: The JDK research-lock.json pins
-        id: lock
-        run: |
-          echo "java=$(sed -n 's/.*"java_major": *\([0-9]*\).*/\1/p' research-lock.json | head -1)" >> "$GITHUB_OUTPUT"
-      # What tools/ci/linux-runner.sh installs on Ubuntu, less the screen (Xvfb, lavapipe: this harness draws
-      # nothing) and sccache.
-      - name: Build packages
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends build-essential pkg-config cmake libasound2-dev libudev-dev > /dev/null
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        with:
-          python-version: '3.13'
-      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
-        with:
-          distribution: temurin
-          java-version: ${{ steps.lock.outputs.java }}
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable, 2026-11
-        with:
-          toolchain: stable
-      - name: Tools from the runner
-        run: |
-          bash tools/ci/runner-env.sh
-          echo "runner setup $(( $(date +%s) - SETUP_START ))" >> "$RUNNER_TEMP/timings"
-      # Seconds each harness spends in javac, java (its oracle) and cargo, by harness (parity.py gives each harness its
-      # own HORIZON_HOME): names and numbers only. Each wrapper runs the real program by its absolute path.
-      - name: Timing wrappers
-        run: |
-          mkdir -p "$RUNNER_TEMP/timing-bin"
-          for name in javac java cargo; do
-            real=$(command -v "$name")
-            cat > "$RUNNER_TEMP/timing-bin/$name" <<EOF
-          #!/usr/bin/env bash
-          start=\$(date +%s.%N)
-          "$real" "\$@"
-          status=\$?
-          h=\${HORIZON_HOME##*/}
-          echo "$name \${h:--} \$(date +%s.%N) \$start" >> "$RUNNER_TEMP/tool-times"
-          exit \$status
+          export CARGO_TARGET_DIR="$PWD/.local/parity-target" CARGO_PROFILE_RELEASE_LTO=false \
+            CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_PROFILE_RELEASE_INCREMENTAL=true CARGO_PROFILE_DEV_OPT_LEVEL=3
+          cargo build --locked --release -p horizon-world --example world_probe
+          cargo build --locked -p horizon-world --example world_probe
+          cargo build --locked --profile fast -p horizon-client-lib --example client_probe
+          cargo build --locked -p horizon-client-lib --example client_probe
+          cargo build --locked --profile fast -p horizon-game -p horizon-client-lib --bins
           EOF
-            chmod +x "$RUNNER_TEMP/timing-bin/$name"
-          done
-          echo "$RUNNER_TEMP/timing-bin" >> "$GITHUB_PATH"
+      - name: Build with no vanilla data on the runner
+        run: |
+          [ ! -e .local ] && [ ! -e "$VANILLA" ] || { echo "::error::vanilla data present"; exit 1; }
+          start=$(date +%s)
+          bash "$RUNNER_TEMP/builds.sh"
+          echo "builds without data: $(( $(date +%s) - start )) s"
+          mkdir -p "$RUNNER_TEMP/without"
+          mv .local/parity-target "$RUNNER_TEMP/without/parity-target"
+          mv target "$RUNNER_TEMP/without/target"
+          rmdir .local
       - name: Fetch the vanilla data
         env:
           VANILLA_DATA_DEPLOY_KEY: ${{ secrets.VANILLA_DATA_DEPLOY_KEY }}
           VANILLA_DATA_PASSPHRASE: ${{ secrets.VANILLA_DATA_PASSPHRASE }}
-        run: |
-          start=$(date +%s)
-          bash tools/ci/fetch-vanilla-data.sh 26.3-linux-x64 "$HORIZON_SHARED_SOURCE"
-          echo "data fetch, decrypt, unpack $(( $(date +%s) - start ))" >> "$RUNNER_TEMP/timings"
-      # Built here first, so that vanilla-data.sh's own cargo build finds it done and its time is the export's.
-      - name: Build horizon-prepare
-        run: |
-          start=$(date +%s)
-          cargo build --release --locked -p horizon-prepare
-          echo "horizon-prepare build $(( $(date +%s) - start ))" >> "$RUNNER_TEMP/timings"
+        run: bash tools/ci/fetch-vanilla-data.sh "$DATASET" "$HORIZON_SHARED_SOURCE"
       - name: Vanilla data, and resources prepared by this preparer
         run: |
-          start=$(date +%s)
           bash tools/ci/vanilla-data.sh
-          echo "resource export (vanilla-data.sh) $(( $(date +%s) - start ))" >> "$RUNNER_TEMP/timings"
-      # world_probe, built first as parity.py builds it (its target folder and profile settings): the probes' cold cost.
-      - name: Build world_probe
+          # vanilla-data.sh built horizon-prepare into target/ itself: that build is the first one's, made again here.
+          mkdir -p "$RUNNER_TEMP/with" && mv target "$RUNNER_TEMP/with/prepare-target"
+      - name: Build after the fetch and the export
         run: |
           start=$(date +%s)
-          CARGO_TARGET_DIR="$PWD/.local/parity-target" CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
-            CARGO_PROFILE_RELEASE_INCREMENTAL=true CARGO_PROFILE_DEV_OPT_LEVEL=3 \
-            cargo build --locked --release -p horizon-world --example world_probe
-          echo "probe build (world_probe) $(( $(date +%s) - start ))" >> "$RUNNER_TEMP/timings"
-      - name: The harnesses
-        env:
-          PARITY_HOSTS: ''
+          bash "$RUNNER_TEMP/builds.sh"
+          echo "builds with data: $(( $(date +%s) - start )) s"
+      - name: Compare the two builds, file by file
         run: |
-          set -o pipefail
-          start=$(date +%s)
-          status=0
-          python3 tools/parity.py --timeout 900 food java_hash_map block_properties block_state_codec collision fluid_shape \
-            heightmap item_cooldowns item_durability status_effect attribute damage_source fall_damage piston_shape \
-            simple_container snbt_unicode world_border biome_zoom rule_test value_provider height_provider carving_mask \
-            | tee "$RUNNER_TEMP/parity.out" || status=$?
-          echo "22 harnesses (8 at a time) $(( $(date +%s) - start ))" >> "$RUNNER_TEMP/timings"
-          exit "$status"
-      - name: Seconds per harness in the oracles and in cargo
-        if: always()
-        run: |
-          touch "$RUNNER_TEMP/tool-times" "$RUNNER_TEMP/parity.out"
           python3 - <<'EOF' | tee -a "$GITHUB_STEP_SUMMARY"
-          import collections, os, re
+          import collections, hashlib, os
+          from concurrent.futures import ThreadPoolExecutor
           temp = os.environ["RUNNER_TEMP"]
-          spent = collections.defaultdict(collections.Counter)
-          for line in open(f"{temp}/tool-times"):
-              tool, harness, end, start = line.split()
-              spent[harness][tool] += float(end) - float(start)
-          totals = {m[2]: m[3] for m in re.finditer(r"^(PASS|FAIL) (\S+) (\d+)s", open(f"{temp}/parity.out").read(), re.M)}
-          print("| Harness | Result seconds | javac | java (oracle) | cargo |")
-          print("| --- | ---: | ---: | ---: | ---: |")
-          for harness in sorted(set(spent) | set(totals)):
-              s = spent[harness]
-              print(f"| {harness} | {totals.get(harness, '')} | {s['javac']:.0f} | {s['java']:.0f} | {s['cargo']:.0f} |")
+          def files(root):
+              found = {}
+              for directory, _, names in os.walk(root):
+                  for name in names:
+                      path = os.path.join(directory, name)
+                      if not os.path.islink(path):
+                          found[os.path.relpath(path, root)] = path
+              return found
+          def digest(path):
+              with open(path, "rb") as stream:
+                  return hashlib.file_digest(stream, "sha256").hexdigest()
+          def digests(found):
+              with ThreadPoolExecutor(16) as pool:
+                  return dict(zip(found, pool.map(digest, found.values())))
+          pairs = [("parity-target", f"{temp}/without/parity-target", ".local/parity-target"),
+                   ("target (horizon-prepare)", f"{temp}/without/target", "target")]
+          built = {}
+          for label, without, with_ in pairs:
+              a, b = digests(files(without)), digests(files(with_))
+              built.update({f"{with_}/{k}": v for k, v in b.items()})
+              only_a, only_b = sorted(set(a) - set(b)), sorted(set(b) - set(a))
+              changed = sorted(k for k in set(a) & set(b) if a[k] != b[k])
+              kinds = collections.Counter()
+              def kind(path):
+                  parts = path.split("/")
+                  if "incremental" in parts: return "incremental"
+                  if ".fingerprint" in parts: return ".fingerprint"
+                  if "build" in parts[:2]: return "build-script"
+                  return "/".join(parts[:2])
+              for path in only_a + only_b + changed:
+                  kinds[kind(path)] += 1
+              print(f"\n### {label}\n")
+              print(f"{len(a)} files without data, {len(b)} with; {len(changed)} differ, {len(only_a)} only without, "
+                    f"{len(only_b)} only with\n")
+              print("| kind | files |\n| --- | ---: |")
+              for name, count in sorted(kinds.items()):
+                  print(f"| {name} | {count} |")
+              print("\n<details><summary>every differing file (incremental/ by session folder)</summary>\n\n```")
+              seen = set()
+              for tag, group in (("differs", changed), ("only without", only_a), ("only with", only_b)):
+                  for path in group:
+                      parts = path.split("/")
+                      if "incremental" in parts:
+                          index = parts.index("incremental")
+                          path = "/".join(parts[:index + 2]) + "/..."
+                      if (tag, path) not in seen:
+                          seen.add((tag, path))
+                          print(f"{tag}: {path}")
+              print("```\n</details>")
+          data = {}
+          for root in (os.environ["HORIZON_SHARED_SOURCE"], os.environ["HORIZON_PREPARED_CACHE"]):
+              found = {k: v for k, v in files(root).items() if os.path.getsize(v) >= 64}
+              data.update({v: k for k, v in digests(found).items()})
+          copies = sorted({path for path, value in built.items() if value in data})
+          print(f"\n{len(data)} distinct files of 64 bytes or more in the dataset and the prepared resources; "
+                f"build files byte-identical to one of them: {len(copies)}")
+          for path in copies:
+              print(f"- {path}")
           EOF
-      - name: Timings
-        if: always()
+      - name: References to the data's folders in the build
         run: |
-          touch "$RUNNER_TEMP/timings"
-          {
-            echo "| Part | Seconds |"
-            echo "| --- | ---: |"
-            while read -r line; do echo "| ${line% *} | ${line##* } |"; done < "$RUNNER_TEMP/timings"
-            echo "| total, from the first step | $(( $(date +%s) - SETUP_START )) |"
-          } | tee -a "$GITHUB_STEP_SUMMARY"
-          echo "disk: vanilla $(du -sk "$VANILLA" | cut -f1) KiB, probe target $(du -sk .local/parity-target 2>/dev/null | cut -f1) KiB, target $(du -sk target 2>/dev/null | cut -f1) KiB"
+          for needle in "$VANILLA" ".local/minecraft" ".local/horizon-client"; do
+            echo "files naming $needle: $(grep -rlaF -- "$needle" .local/parity-target | wc -l)"
+          done
 
-  # Two harnesses that drive game windows (remote_fireball, remote_fireworks: on playhorizon's 4 CPUs lavapipe renders
-  # them too slowly) on Xvfb with Mesa's software Vulkan, as tools/ci/linux-runner.sh sets up a GPU-less runner: does a
-  # 16-vCPU runner without a GPU pass them, and what do the game's cold build and the oracles cost?
-  harness-render:
-    if: false # measured in run 44617266924 or earlier; only harness-client runs from here on
+  # The harness set (22 server-side, 10 client-probe, 3 game-starting), with each cache restored when there is one and
+  # saved when there was none, every part timed: the first run is the cold one, later runs the warm ones.
+  harnesses:
     runs-on: blacksmith-16vcpu-ubuntu-2404
-    timeout-minutes: 75
+    timeout-minutes: 100
     env:
-      HORIZON_TELEMETRY_URL: "off"
-      # No compiler cache: sccache's cache would outlive nothing here, and no cache may hold this job's output.
-      HORIZON_NO_SCCACHE: "1"
-      CARGO_BUILD_JOBS: "16"
       PARITY_LOCAL_JOBS: "8"
       PARITY_MACHINE_JOBS: "8"
     steps:
       - name: Clock
         run: |
-          echo "SETUP_START=$(date +%s)" >> "$GITHUB_ENV"
           {
+            echo "SETUP_START=$(date +%s%N)"
             echo "VANILLA=$RUNNER_TEMP/vanilla"
             echo "HORIZON_SHARED_SOURCE=$RUNNER_TEMP/vanilla/shared-local"
             echo "HORIZON_PREPARED_CACHE=$RUNNER_TEMP/vanilla/prepared"
             echo "PARITY_SHARED=$RUNNER_TEMP/vanilla/parity-shared"
+            echo "VANILLA_DATA_ENCRYPTED=$RUNNER_TEMP/vanilla-encrypted"
+            echo "SEALED=$RUNNER_TEMP/sealed"
           } >> "$GITHUB_ENV"
+          # since START: seconds with one decimal; record LABEL START: a line of the timings table.
+          cat > "$RUNNER_TEMP/clock.sh" <<'EOF'
+          since() { awk -v a="$1" -v b="$(date +%s%N)" 'BEGIN { printf "%.1f", (b - a) / 1e9 }'; }
+          record() { echo "$1 $(since "$2")" >> "$RUNNER_TEMP/timings"; }
+          mark() { echo "MARK=$(date +%s%N)" >> "$GITHUB_ENV"; }
+          EOF
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -292,154 +199,31 @@ jobs:
         id: lock
         run: |
           echo "java=$(sed -n 's/.*"java_major": *\([0-9]*\).*/\1/p' research-lock.json | head -1)" >> "$GITHUB_OUTPUT"
-      # What tools/ci/linux-runner.sh installs on Ubuntu, the screen included (Xvfb, Mesa's lavapipe), less sccache.
+      # What the image already has: the apt packages below, Rust, the JDK and Python in the tool cache.
+      - name: What the runner image holds
+        run: |
+          for package in build-essential pkg-config cmake libasound2-dev libudev-dev mesa-vulkan-drivers libvulkan1 xvfb \
+              libx11-6 libxcursor1 libxrandr2 libxi6 libxinerama1 libxkbcommon0 libxkbcommon-x11-0 libgl1 libegl1; do
+            echo "$package: $(dpkg-query -W -f='${Status} ${Version}' "$package" 2>/dev/null || echo absent)"
+          done
+          echo "rustc: $(rustc -V 2>&1 || true)"; echo "rustup: $(rustup toolchain list 2>&1 | tr '\n' ' ' || true)"
+          ls -d /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk/*/ /opt/hostedtoolcache/Python/3.13*/ 2>/dev/null || true
       - name: Build and screen packages
         run: |
+          . "$RUNNER_TEMP/clock.sh"
+          start=$(date +%s%N)
           sudo apt-get update -qq
+          record "setup: apt-get update" "$start"
+          start=$(date +%s%N)
           sudo apt-get install -y -qq --no-install-recommends build-essential pkg-config cmake libasound2-dev libudev-dev \
             mesa-vulkan-drivers libvulkan1 xvfb libx11-6 libxcursor1 libxrandr2 libxi6 libxinerama1 libxkbcommon0 \
             libxkbcommon-x11-0 libgl1 libegl1 > /dev/null
-      - name: A virtual screen
-        run: |
-          Xvfb :90 -screen 0 1280x720x24 -nolisten tcp > /dev/null 2>&1 &
-          { echo "DISPLAY=:90"; echo "VK_DRIVER_FILES=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -1)"; } >> "$GITHUB_ENV"
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        with:
-          python-version: '3.13'
-      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
-        with:
-          distribution: temurin
-          java-version: ${{ steps.lock.outputs.java }}
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable, 2026-11
-        with:
-          toolchain: stable
-      - name: Tools from the runner
-        run: |
-          bash tools/ci/runner-env.sh
-          echo "runner setup $(( $(date +%s) - SETUP_START ))" >> "$RUNNER_TEMP/timings"
-      # Seconds each harness spends in javac, java (its oracle) and cargo, by harness (parity.py gives each harness its
-      # own HORIZON_HOME): names and numbers only. Each wrapper runs the real program by its absolute path.
-      - name: Timing wrappers
-        run: |
-          mkdir -p "$RUNNER_TEMP/timing-bin"
-          for name in javac java cargo; do
-            real=$(command -v "$name")
-            cat > "$RUNNER_TEMP/timing-bin/$name" <<EOF
-          #!/usr/bin/env bash
-          start=\$(date +%s.%N)
-          "$real" "\$@"
-          status=\$?
-          h=\${HORIZON_HOME##*/}
-          echo "$name \${h:--} \$(date +%s.%N) \$start" >> "$RUNNER_TEMP/tool-times"
-          exit \$status
-          EOF
-            chmod +x "$RUNNER_TEMP/timing-bin/$name"
-          done
-          echo "$RUNNER_TEMP/timing-bin" >> "$GITHUB_PATH"
-      - name: Fetch the vanilla data
-        env:
-          VANILLA_DATA_DEPLOY_KEY: ${{ secrets.VANILLA_DATA_DEPLOY_KEY }}
-          VANILLA_DATA_PASSPHRASE: ${{ secrets.VANILLA_DATA_PASSPHRASE }}
-        run: |
-          start=$(date +%s)
-          bash tools/ci/fetch-vanilla-data.sh 26.3-linux-x64 "$HORIZON_SHARED_SOURCE"
-          echo "data fetch, decrypt, unpack $(( $(date +%s) - start ))" >> "$RUNNER_TEMP/timings"
-      # Built here first, so that vanilla-data.sh's own cargo build finds it done and its time is the export's.
-      - name: Build horizon-prepare
-        run: |
-          start=$(date +%s)
-          cargo build --release --locked -p horizon-prepare
-          echo "horizon-prepare build $(( $(date +%s) - start ))" >> "$RUNNER_TEMP/timings"
-      - name: Vanilla data, and resources prepared by this preparer
-        run: |
-          start=$(date +%s)
-          bash tools/ci/vanilla-data.sh
-          echo "resource export (vanilla-data.sh) $(( $(date +%s) - start ))" >> "$RUNNER_TEMP/timings"
-      - name: The harnesses
-        env:
-          PARITY_HOSTS: ''
-        run: |
-          set -o pipefail
-          start=$(date +%s)
-          status=0
-          python3 tools/parity.py --timeout 1800 remote_fireball remote_fireworks \
-            | tee "$RUNNER_TEMP/parity.out" || status=$?
-          echo "remote_fireball and remote_fireworks, the game's cold build included $(( $(date +%s) - start ))" >> "$RUNNER_TEMP/timings"
-          exit "$status"
-      - name: Seconds per harness in the oracles and in cargo
-        if: always()
-        run: |
-          touch "$RUNNER_TEMP/tool-times" "$RUNNER_TEMP/parity.out"
-          python3 - <<'EOF' | tee -a "$GITHUB_STEP_SUMMARY"
-          import collections, os, re
-          temp = os.environ["RUNNER_TEMP"]
-          spent = collections.defaultdict(collections.Counter)
-          for line in open(f"{temp}/tool-times"):
-              tool, harness, end, start = line.split()
-              spent[harness][tool] += float(end) - float(start)
-          totals = {m[2]: m[3] for m in re.finditer(r"^(PASS|FAIL) (\S+) (\d+)s", open(f"{temp}/parity.out").read(), re.M)}
-          print("| Harness | Result seconds | javac | java (oracle) | cargo |")
-          print("| --- | ---: | ---: | ---: | ---: |")
-          for harness in sorted(set(spent) | set(totals)):
-              s = spent[harness]
-              print(f"| {harness} | {totals.get(harness, '')} | {s['javac']:.0f} | {s['java']:.0f} | {s['cargo']:.0f} |")
-          EOF
-      - name: Timings
-        if: always()
-        run: |
-          touch "$RUNNER_TEMP/timings"
-          {
-            echo "| Part | Seconds |"
-            echo "| --- | ---: |"
-            while read -r line; do echo "| ${line% *} | ${line##* } |"; done < "$RUNNER_TEMP/timings"
-            echo "| total, from the first step | $(( $(date +%s) - SETUP_START )) |"
-          } | tee -a "$GITHUB_STEP_SUMMARY"
-          echo "disk: vanilla $(du -sk "$VANILLA" | cut -f1) KiB, probe target $(du -sk .local/parity-target 2>/dev/null | cut -f1) KiB, target $(du -sk target 2>/dev/null | cut -f1) KiB"
-
-  # The horizon-client probes: client_probe's cold build in the two profiles the harnesses use (fast, and dev with
-  # parity.py's opt-level 3), with its time and disk use, then 10 harnesses that run it without starting the game.
-  # Last, one harness that starts the game and drives it with horizon-ctl (spawn_loot: offscreen on lavapipe, under
-  # Xvfb). One attempt; its result is recorded whatever it is.
-  harness-client:
-    runs-on: blacksmith-16vcpu-ubuntu-2404
-    timeout-minutes: 90
-    env:
-      HORIZON_TELEMETRY_URL: "off"
-      # No compiler cache: sccache's cache would outlive nothing here, and no cache may hold this job's output.
-      HORIZON_NO_SCCACHE: "1"
-      CARGO_BUILD_JOBS: "16"
-      PARITY_LOCAL_JOBS: "8"
-      PARITY_MACHINE_JOBS: "8"
-    steps:
-      - name: Clock
-        run: |
-          echo "SETUP_START=$(date +%s)" >> "$GITHUB_ENV"
-          {
-            echo "VANILLA=$RUNNER_TEMP/vanilla"
-            echo "HORIZON_SHARED_SOURCE=$RUNNER_TEMP/vanilla/shared-local"
-            echo "HORIZON_PREPARED_CACHE=$RUNNER_TEMP/vanilla/prepared"
-            echo "PARITY_SHARED=$RUNNER_TEMP/vanilla/parity-shared"
-          } >> "$GITHUB_ENV"
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: The JDK research-lock.json pins
-        id: lock
-        run: |
-          echo "java=$(sed -n 's/.*"java_major": *\([0-9]*\).*/\1/p' research-lock.json | head -1)" >> "$GITHUB_OUTPUT"
-      # What tools/ci/linux-runner.sh installs on Ubuntu, the screen included (Xvfb, Mesa's lavapipe), less sccache.
-      - name: Build and screen packages
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends build-essential pkg-config cmake libasound2-dev libudev-dev \
-            mesa-vulkan-drivers libvulkan1 xvfb libx11-6 libxcursor1 libxrandr2 libxi6 libxinerama1 libxkbcommon0 \
-            libxkbcommon-x11-0 libgl1 libegl1 > /dev/null
+          record "setup: apt-get install" "$start"
       - name: A virtual screen
         run: |
           Xvfb :90 -screen 0 1280x720x24 -nolisten tcp > /dev/null 2>&1 &
           icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -1)
           [ -n "$icd" ] || { echo "::error::no lavapipe driver file"; exit 1; }
-          echo "lavapipe: $icd"
           { echo "DISPLAY=:90"; echo "VK_DRIVER_FILES=$icd"; } >> "$GITHUB_ENV"
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
@@ -448,15 +232,17 @@ jobs:
         with:
           distribution: temurin
           java-version: ${{ steps.lock.outputs.java }}
+      - name: Mark
+        run: . "$RUNNER_TEMP/clock.sh" && mark
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable, 2026-11
         with:
           toolchain: stable
       - name: Tools from the runner
         run: |
+          . "$RUNNER_TEMP/clock.sh"
+          record "setup: rust-toolchain action" "$MARK"
           bash tools/ci/runner-env.sh
-          echo "runner setup $(( $(date +%s) - SETUP_START ))" >> "$RUNNER_TEMP/timings"
-      # Seconds each harness spends in javac, java (its oracle) and cargo, by harness (parity.py gives each harness its
-      # own HORIZON_HOME): names and numbers only. Each wrapper runs the real program by its absolute path.
+          record "runner setup (all of it, from the first step)" "$SETUP_START"
       - name: Timing wrappers
         run: |
           mkdir -p "$RUNNER_TEMP/timing-bin"
@@ -474,73 +260,246 @@ jobs:
             chmod +x "$RUNNER_TEMP/timing-bin/$name"
           done
           echo "$RUNNER_TEMP/timing-bin" >> "$GITHUB_PATH"
+      # Keys. The probe build: the toolchain and Cargo.lock, then the commit (restored from the newest of the same
+      # toolchain and lock). The oracle results and parity state: the dataset, the JDK, the toolchain, the runner's
+      # folders, then the commit. The prepared resources: vanilla-data.sh's own key and the dataset.
+      - name: Cache keys
+        id: keys
+        run: |
+          h() { sha256sum | cut -c1-12; }
+          rust=$(rustc -vV | h)
+          lock=$(h < Cargo.lock)
+          java=$(java -version 2>&1 | h)
+          folders=$(echo "$GITHUB_WORKSPACE $RUNNER_TEMP" | h)
+          prepare=$(git ls-files -s crates/horizon-prepare mods/horizon/src/test/java research-lock.json tools/ci/vanilla-data.sh tools/ci/seed_prepared_extras.py tools/prepare_output.py | sha256sum | cut -c1-16)
+          echo "prepare_key=$prepare" >> "$GITHUB_OUTPUT"
+          {
+            echo "target_prefix=parity-speed-trial-target-$rust-$lock-"
+            echo "oracle_prefix=parity-speed-trial-oracle-$DATASET-$java-$rust-$folders-"
+            echo "prepared=parity-speed-trial-prepared-$DATASET-$prepare"
+            echo "dataset=parity-speed-trial-dataset-$DATASET-v1"
+          } | tee -a "$GITHUB_OUTPUT"
+      - name: Mark
+        run: . "$RUNNER_TEMP/clock.sh" && mark
+      - name: Restore the encrypted dataset
+        id: dataset
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.VANILLA_DATA_ENCRYPTED }}
+          key: ${{ steps.keys.outputs.dataset }}
       - name: Fetch the vanilla data
         env:
           VANILLA_DATA_DEPLOY_KEY: ${{ secrets.VANILLA_DATA_DEPLOY_KEY }}
           VANILLA_DATA_PASSPHRASE: ${{ secrets.VANILLA_DATA_PASSPHRASE }}
         run: |
-          start=$(date +%s)
-          bash tools/ci/fetch-vanilla-data.sh 26.3-linux-x64 "$HORIZON_SHARED_SOURCE"
-          echo "data fetch, decrypt, unpack $(( $(date +%s) - start ))" >> "$RUNNER_TEMP/timings"
-      # Built here first, so that vanilla-data.sh's own cargo build finds it done and its time is the export's.
+          . "$RUNNER_TEMP/clock.sh"
+          record "restore: encrypted dataset (hit ${{ steps.dataset.outputs.cache-hit || 'false' }})" "$MARK"
+          start=$(date +%s%N)
+          bash tools/ci/fetch-vanilla-data.sh "$DATASET" "$HORIZON_SHARED_SOURCE"
+          record "data fetch, decrypt, unpack" "$start"
+      - name: Mark
+        run: . "$RUNNER_TEMP/clock.sh" && mark
+      - name: Restore the prepared resources (sealed)
+        id: prepared
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.SEALED }}/prepared
+          key: ${{ steps.keys.outputs.prepared }}
+      - name: Mark
+        run: |
+          . "$RUNNER_TEMP/clock.sh"
+          record "restore: prepared resources, sealed (hit ${{ steps.prepared.outputs.cache-hit || 'false' }})" "$MARK"
+          mark
+      - name: Restore the probe build (clear)
+        id: target-clear
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .local/parity-target
+            target
+          key: ${{ steps.keys.outputs.target_prefix }}clear-${{ github.sha }}
+          restore-keys: ${{ steps.keys.outputs.target_prefix }}clear-
+      - name: Mark
+        run: |
+          . "$RUNNER_TEMP/clock.sh"
+          record "restore: probe build, clear (matched ${{ steps.target-clear.outputs.cache-matched-key && 'yes' || 'no' }})" "$MARK"
+          mark
+      - name: Restore the probe build (sealed)
+        id: target-sealed
+        if: steps.target-clear.outputs.cache-matched-key == ''
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.SEALED }}/target
+          key: ${{ steps.keys.outputs.target_prefix }}sealed-${{ github.sha }}
+          restore-keys: ${{ steps.keys.outputs.target_prefix }}sealed-
+      - name: Mark
+        run: |
+          . "$RUNNER_TEMP/clock.sh"
+          record "restore: probe build, sealed (matched ${{ steps.target-sealed.outputs.cache-matched-key && 'yes' || 'no' }})" "$MARK"
+          mark
+      - name: Restore the oracle results and parity state (sealed)
+        id: oracle
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.SEALED }}/oracle
+          key: ${{ steps.keys.outputs.oracle_prefix }}${{ github.sha }}
+          restore-keys: ${{ steps.keys.outputs.oracle_prefix }}
+      - name: Unseal what was restored
+        env:
+          VANILLA_DATA_PASSPHRASE: ${{ secrets.VANILLA_DATA_PASSPHRASE }}
+        run: |
+          . "$RUNNER_TEMP/clock.sh"
+          record "restore: oracle results and state, sealed (matched ${{ steps.oracle.outputs.cache-matched-key && 'yes' || 'no' }})" "$MARK"
+          for name in prepared target oracle; do
+            if [ -f "$SEALED/$name/archive" ]; then
+              start=$(date +%s%N)
+              VANILLA_DATA_PASSPHRASE="$VANILLA_DATA_PASSPHRASE" bash tools/ci/sealed-cache.sh unseal "$SEALED/$name/archive"
+              record "unseal: $name" "$start"
+              rm -rf "${SEALED:?}/$name"
+            fi
+          done
+      # A checkout dates every file now: files whose Git object is the one the restored build saw get that build's
+      # dates back (as tools/ci/build_folder.sh does for the sticky disks), so Cargo rebuilds only what changed.
+      - name: Source dates of the restored build
+        run: |
+          . "$RUNNER_TEMP/clock.sh"
+          start=$(date +%s%N)
+          python3 tools/ci/source_mtimes.py .local/parity-target/source-mtimes-v1.json
+          record "source dates (source_mtimes.py)" "$start"
+      - name: Crate downloads
+        run: |
+          . "$RUNNER_TEMP/clock.sh"
+          start=$(date +%s%N)
+          cargo fetch --locked
+          record "cargo fetch (registry download)" "$start"
       - name: Build horizon-prepare
         run: |
-          start=$(date +%s)
-          cargo build --release --locked -p horizon-prepare
-          echo "horizon-prepare build $(( $(date +%s) - start ))" >> "$RUNNER_TEMP/timings"
+          . "$RUNNER_TEMP/clock.sh"
+          start=$(date +%s%N)
+          cargo build --release --locked -p horizon-prepare 2> "$RUNNER_TEMP/prepare-build.err"
+          record "horizon-prepare build (crates compiled: $(grep -c '^ *Compiling ' "$RUNNER_TEMP/prepare-build.err" || true))" "$start"
       - name: Vanilla data, and resources prepared by this preparer
         run: |
-          start=$(date +%s)
+          . "$RUNNER_TEMP/clock.sh"
+          start=$(date +%s%N)
           bash tools/ci/vanilla-data.sh
-          echo "resource export (vanilla-data.sh) $(( $(date +%s) - start ))" >> "$RUNNER_TEMP/timings"
-      # client_probe, built as the harnesses build it (parity.py's target folder and profile settings), once per profile
-      # they use. The disk figure is the whole probe target folder after each build.
-      - name: Build client_probe (fast, then dev)
+          record "resource export (vanilla-data.sh)" "$start"
+      # The probes, built as the harnesses build them (parity.py's target folder and profile settings); world_probe in
+      # the dev profile is what snbt_unicode builds itself (at 2 jobs).
+      - name: Build the probes and the game
         run: |
+          . "$RUNNER_TEMP/clock.sh"
           export CARGO_TARGET_DIR="$PWD/.local/parity-target" CARGO_PROFILE_RELEASE_LTO=false \
             CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_PROFILE_RELEASE_INCREMENTAL=true CARGO_PROFILE_DEV_OPT_LEVEL=3
-          start=$(date +%s)
-          cargo build --locked --profile fast -p horizon-client-lib --example client_probe
-          echo "client_probe build, fast $(( $(date +%s) - start ))" >> "$RUNNER_TEMP/timings"
-          echo "probe target KiB after fast $(du -sk .local/parity-target | cut -f1)" >> "$RUNNER_TEMP/timings"
-          start=$(date +%s)
-          cargo build --locked -p horizon-client-lib --example client_probe
-          echo "client_probe build, dev (opt-level 3) $(( $(date +%s) - start ))" >> "$RUNNER_TEMP/timings"
-          echo "probe target KiB after dev $(du -sk .local/parity-target | cut -f1)" >> "$RUNNER_TEMP/timings"
-      - name: The client-probe harnesses
+          build() {
+            local label=$1 log=$RUNNER_TEMP/build-$2.err
+            shift 2
+            local start
+            start=$(date +%s%N)
+            cargo build --locked "$@" 2> "$log"
+            record "$label (crates compiled: $(grep -c '^ *Compiling ' "$log" || true))" "$start"
+          }
+          build "world_probe build, release" world-release --release -p horizon-world --example world_probe
+          build "world_probe build, dev (snbt_unicode's)" world-dev -p horizon-world --example world_probe
+          build "client_probe build, fast" client-fast --profile fast -p horizon-client-lib --example client_probe
+          build "client_probe build, dev" client-dev -p horizon-client-lib --example client_probe
+          build "game and horizon-ctl build, fast" game -v --profile fast -p horizon-game -p horizon-client-lib --bins
+          build "game alone, as composter builds it" game-alone -v --profile fast -p horizon-game --bin horizon-client
+          echo "probe target KiB $(du -sk .local/parity-target | cut -f1)" >> "$RUNNER_TEMP/timings"
+      # Why the game is built twice: the crates the second command compiled, with the features and metadata each
+      # command gave them. Names, flags and hashes only.
+      - name: The two game builds compared
+        if: ${{ !cancelled() }}
+        run: |
+          for selection in "-p horizon-game -p horizon-client-lib" "-p horizon-game"; do
+            # shellcheck disable=SC2086
+            cargo tree --locked -e normal,build,features $selection -f '{p} {f}' --prefix none | sort -u > "$RUNNER_TEMP/tree-${selection// /_}.txt"
+          done
+          echo "cargo tree lines only in the two-package selection (first 40):"
+          comm -23 "$RUNNER_TEMP/tree--p_horizon-game_-p_horizon-client-lib.txt" "$RUNNER_TEMP/tree--p_horizon-game.txt" | head -40
+          echo "cargo tree lines only in horizon-game alone (first 40):"
+          comm -13 "$RUNNER_TEMP/tree--p_horizon-game_-p_horizon-client-lib.txt" "$RUNNER_TEMP/tree--p_horizon-game.txt" | head -40
+          python3 - <<'EOF'
+          import os, re
+          temp = os.environ["RUNNER_TEMP"]
+          def units(name):
+              found = {}
+              for line in open(f"{temp}/build-{name}.err", encoding="utf-8", errors="replace"):
+                  if "Running `" not in line or "--crate-name" not in line:
+                      continue
+                  crate = re.search(r"--crate-name (\S+)", line).group(1)
+                  kind = re.search(r"--crate-type (\S+)", line)
+                  features = sorted(re.findall(r"feature=\\?\"([^\"\\]+)", line))
+                  metadata = re.search(r"-C metadata=(\S+)", line)
+                  found.setdefault((crate, kind.group(1) if kind else "?"), []).append((metadata.group(1) if metadata else "?", features))
+              return found
+          first, second = units("game"), units("game-alone")
+          print(f"units compiled: first command {sum(map(len, first.values()))}, second {sum(map(len, second.values()))}")
+          for key, builds in sorted(second.items()):
+              for metadata, features in builds:
+                  before = first.get(key, [])
+                  same = [f for m, f in before if m == metadata]
+                  if same:
+                      note = "same metadata as in the first build (rebuilt, not a new unit)"
+                  elif before:
+                      note = "; ".join(f"first build's features {sorted(set(f) - set(features))} more, {sorted(set(features) - set(f))} fewer" for m, f in before)
+                  else:
+                      note = "not compiled by the first command"
+                  print(f"{key[0]} ({key[1]}): {note}")
+          EOF
+      - name: The probe build's files after the builds
+        if: ${{ !cancelled() }}
+        run: find .local/parity-target target -type f -printf '%s %T@ %p\n' | sort -k3 > "$RUNNER_TEMP/target-after-builds"
+      - name: 22 server-side harnesses
+        if: ${{ !cancelled() }}
         env:
           PARITY_HOSTS: ''
         run: |
+          . "$RUNNER_TEMP/clock.sh"
           set -o pipefail
-          start=$(date +%s)
+          start=$(date +%s%N)
+          status=0
+          python3 tools/parity.py --timeout 900 food java_hash_map block_properties block_state_codec collision fluid_shape \
+            heightmap item_cooldowns item_durability status_effect attribute damage_source fall_damage piston_shape \
+            simple_container snbt_unicode world_border biome_zoom rule_test value_provider height_provider carving_mask \
+            | tee -a "$RUNNER_TEMP/parity.out" || status=$?
+          record "22 server-side harnesses (8 at a time)" "$start"
+          exit "$status"
+      - name: 10 client-probe harnesses
+        if: ${{ !cancelled() }}
+        env:
+          PARITY_HOSTS: ''
+        run: |
+          . "$RUNNER_TEMP/clock.sh"
+          set -o pipefail
+          start=$(date +%s%N)
           status=0
           python3 tools/parity.py --timeout 1200 enchanting light hud scoreboard team_rules stack_foil hotbar \
             container_title chest_pair recipe_book | tee -a "$RUNNER_TEMP/parity.out" || status=$?
-          echo "10 client-probe harnesses (8 at a time) $(( $(date +%s) - start ))" >> "$RUNNER_TEMP/timings"
+          record "10 client-probe harnesses (8 at a time)" "$start"
           exit "$status"
-      # The game and horizon-ctl, as spawn_loot builds them itself (fast profile, --bins), timed apart from the harness.
-      - name: Build the game and horizon-ctl
-        if: ${{ !cancelled() }}
-        run: |
-          start=$(date +%s)
-          CARGO_TARGET_DIR="$PWD/.local/parity-target" CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
-            CARGO_PROFILE_RELEASE_INCREMENTAL=true CARGO_PROFILE_DEV_OPT_LEVEL=3 \
-            cargo build --locked --profile fast -p horizon-game -p horizon-client-lib --bins
-          echo "game and horizon-ctl build, fast $(( $(date +%s) - start ))" >> "$RUNNER_TEMP/timings"
-          echo "probe target KiB after the game $(du -sk .local/parity-target | cut -f1)" >> "$RUNNER_TEMP/timings"
-      # Three ordinary game-starting harnesses (none solo, named-only or known to fail): spawn_loot drives the game with
-      # horizon-ctl; composter and boat_authority run the client in fixture mode.
-      - name: Harnesses that start the game (lavapipe)
+      - name: 3 game-starting harnesses (lavapipe)
         if: ${{ !cancelled() }}
         env:
           PARITY_HOSTS: ''
         run: |
+          . "$RUNNER_TEMP/clock.sh"
           set -o pipefail
-          start=$(date +%s)
+          start=$(date +%s%N)
           status=0
           python3 tools/parity.py --timeout 1500 spawn_loot composter boat_authority | tee -a "$RUNNER_TEMP/parity.out" || status=$?
-          echo "3 game-starting harnesses $(( $(date +%s) - start ))" >> "$RUNNER_TEMP/timings"
+          record "3 game-starting harnesses" "$start"
           exit "$status"
+      # What the harnesses added to or changed in the build folders, which a cache saved now would hold. Names only.
+      - name: What the harnesses wrote into the probe build
+        if: ${{ !cancelled() }}
+        run: |
+          find .local/parity-target target -type f -printf '%s %T@ %p\n' | sort -k3 > "$RUNNER_TEMP/target-after-harnesses"
+          comm -13 "$RUNNER_TEMP/target-after-builds" "$RUNNER_TEMP/target-after-harnesses" | cut -d' ' -f3- > "$RUNNER_TEMP/target-written"
+          echo "files added or changed by the harnesses: $(wc -l < "$RUNNER_TEMP/target-written")"
+          sed 's#/[^/]*$##' "$RUNNER_TEMP/target-written" | sort | uniq -c | sort -rn | head -40
+          echo "outside incremental/, .fingerprint/ and deps/ (first 60):"
+          grep -v -e '/incremental/' -e '/\.fingerprint/' -e '/deps/' "$RUNNER_TEMP/target-written" | head -60 || true
       - name: Seconds per harness in the oracles and in cargo
         if: always()
         run: |
@@ -549,24 +508,110 @@ jobs:
           import collections, os, re
           temp = os.environ["RUNNER_TEMP"]
           spent = collections.defaultdict(collections.Counter)
+          calls = collections.defaultdict(collections.Counter)
           for line in open(f"{temp}/tool-times"):
               tool, harness, end, start = line.split()
               spent[harness][tool] += float(end) - float(start)
+              calls[harness][tool] += 1
           totals = {m[2]: m[3] for m in re.finditer(r"^(PASS|FAIL) (\S+) (\d+)s", open(f"{temp}/parity.out").read(), re.M)}
-          print("| Harness | Result seconds | javac | java (oracle) | cargo |")
-          print("| --- | ---: | ---: | ---: | ---: |")
+          print("| Harness | Result seconds | javac | java (oracle) | java runs | cargo |")
+          print("| --- | ---: | ---: | ---: | ---: | ---: |")
           for harness in sorted(set(spent) | set(totals)):
               s = spent[harness]
-              print(f"| {harness} | {totals.get(harness, '')} | {s['javac']:.0f} | {s['java']:.0f} | {s['cargo']:.0f} |")
+              print(f"| {harness} | {totals.get(harness, '')} | {s['javac']:.0f} | {s['java']:.0f} | {calls[harness]['java']} | {s['cargo']:.0f} |")
           EOF
+          grep -E "^(RETRIED|retry |PASS|FAIL|[0-9]+ passed)" "$RUNNER_TEMP/parity.out" || true
+      # Saves: sealed for anything game-derived; the probe build in the clear only with SAVE_CLEAR_TARGET.
+      - name: Seal for the caches
+        if: ${{ !cancelled() }}
+        env:
+          VANILLA_DATA_PASSPHRASE: ${{ secrets.VANILLA_DATA_PASSPHRASE }}
+          PREPARED_HIT: ${{ steps.prepared.outputs.cache-hit }}
+          ORACLE_HIT: ${{ steps.oracle.outputs.cache-hit }}
+          SEALED_TARGET_HIT: ${{ steps.target-sealed.outputs.cache-hit }}
+          PREPARE_KEY: ${{ steps.keys.outputs.prepare_key }}
+        run: |
+          . "$RUNNER_TEMP/clock.sh"
+          seal() {
+            local name=$1 start
+            shift
+            start=$(date +%s%N)
+            VANILLA_DATA_PASSPHRASE="$VANILLA_DATA_PASSPHRASE" bash tools/ci/sealed-cache.sh seal "$SEALED/$name/archive" "$@"
+            record "seal: $name" "$start"
+          }
+          if [ "$PREPARED_HIT" != true ]; then seal prepared "$HORIZON_PREPARED_CACHE/prepared/$PREPARE_KEY"; fi
+          if [ "$ORACLE_HIT" != true ]; then
+            # Every real folder in .local/ but the probe build (the rest are links to the data), and parity.py's
+            # shared passes. Game homes are emptied by parity.py before each harness anyway.
+            mapfile -t folders < <(find .local -mindepth 1 -maxdepth 1 -type d ! -name parity-target -printf "$PWD/%p\n")
+            seal oracle "${folders[@]}" "$PARITY_SHARED"
+            echo "oracle seal: $(du -sk "${folders[@]}" "$PARITY_SHARED" 2>/dev/null | sort -rn | head -12 | sed "s#$PWD/##; s#$RUNNER_TEMP/##" | tr '\t' ' ' | paste -sd ';')"
+          fi
+          if [ "$SAVE_CLEAR_TARGET" != true ] && [ "$SEALED_TARGET_HIT" != true ]; then
+            seal target "$PWD/.local/parity-target" "$PWD/target"
+          fi
+      - name: Mark
+        if: ${{ !cancelled() }}
+        run: . "$RUNNER_TEMP/clock.sh" && mark
+      - name: Save the encrypted dataset
+        if: ${{ !cancelled() && steps.dataset.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.VANILLA_DATA_ENCRYPTED }}
+          key: ${{ steps.keys.outputs.dataset }}
+      - name: Save the prepared resources (sealed)
+        if: ${{ !cancelled() && steps.prepared.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.SEALED }}/prepared
+          key: ${{ steps.keys.outputs.prepared }}
+      - name: Mark
+        if: ${{ !cancelled() }}
+        run: |
+          . "$RUNNER_TEMP/clock.sh"
+          record "save: encrypted dataset and prepared resources" "$MARK"
+          mark
+      - name: Save the oracle results and parity state (sealed)
+        if: ${{ !cancelled() && steps.oracle.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.SEALED }}/oracle
+          key: ${{ steps.keys.outputs.oracle_prefix }}${{ github.sha }}
+      - name: Mark
+        if: ${{ !cancelled() }}
+        run: |
+          . "$RUNNER_TEMP/clock.sh"
+          record "save: oracle results and state" "$MARK"
+          mark
+      - name: Save the probe build (sealed)
+        if: ${{ !cancelled() && env.SAVE_CLEAR_TARGET != 'true' && steps.target-sealed.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.SEALED }}/target
+          key: ${{ steps.keys.outputs.target_prefix }}sealed-${{ github.sha }}
+      - name: Save the probe build (clear)
+        if: ${{ !cancelled() && env.SAVE_CLEAR_TARGET == 'true' && steps.target-clear.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .local/parity-target
+            target
+          key: ${{ steps.keys.outputs.target_prefix }}clear-${{ github.sha }}
       - name: Timings
         if: always()
         run: |
-          touch "$RUNNER_TEMP/timings"
+          . "$RUNNER_TEMP/clock.sh"
+          record "save: probe build" "$MARK"
           {
             echo "| Part | Seconds |"
             echo "| --- | ---: |"
             while read -r line; do echo "| ${line% *} | ${line##* } |"; done < "$RUNNER_TEMP/timings"
-            echo "| total, from the first step | $(( $(date +%s) - SETUP_START )) |"
+            echo "| total, from the first step | $(since "$SETUP_START") |"
           } | tee -a "$GITHUB_STEP_SUMMARY"
-          echo "disk: vanilla $(du -sk "$VANILLA" | cut -f1) KiB, probe target $(du -sk .local/parity-target 2>/dev/null | cut -f1) KiB, target $(du -sk target 2>/dev/null | cut -f1) KiB, free $(df -k --output=avail . | tail -1) KiB"
+          echo "sealed archives KiB: $(du -sk "$SEALED"/*/archive 2>/dev/null | sed "s#$SEALED/##; s#/archive##" | tr '\t' ' ' | paste -sd ';')"
+          echo "disk KiB: vanilla $(du -sk "$VANILLA" | cut -f1), encrypted dataset $(du -sk "$VANILLA_DATA_ENCRYPTED" 2>/dev/null | cut -f1), target $(du -sk target 2>/dev/null | cut -f1)"
+          for profile in release debug fast; do
+            for part in deps incremental build examples .fingerprint; do
+              echo "probe target $profile/$part KiB $(du -sk ".local/parity-target/$profile/$part" 2>/dev/null | cut -f1)"
+            done
+          done
