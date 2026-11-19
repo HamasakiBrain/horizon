@@ -14,6 +14,8 @@ env:
   # No compiler cache: what this trial caches is measured by itself.
   HORIZON_NO_SCCACHE: "1"
   CARGO_BUILD_JOBS: "16"
+  # Plain "Compiling" lines to count.
+  CARGO_TERM_COLOR: never
   DATASET: 26.3-linux-x64
   # The probe build folder is cached in the clear only once the differential check found no game content in it.
   SAVE_CLEAR_TARGET: "false"
@@ -25,7 +27,7 @@ jobs:
   # the prepared resources. Nothing is cached or uploaded.
   differential:
     runs-on: blacksmith-16vcpu-ubuntu-2404
-    timeout-minutes: 100
+    timeout-minutes: 130
     steps:
       - name: Clock
         run: |
@@ -70,16 +72,20 @@ jobs:
           cargo build --locked -p horizon-client-lib --example client_probe
           cargo build --locked --profile fast -p horizon-game -p horizon-client-lib --bins
           EOF
-      - name: Build with no vanilla data on the runner
+      # Twice: the second build, made the same way, is the control. A file that differs between the two builds without
+      # data differs because the build is not reproducible, not because of the data.
+      - name: Build twice with no vanilla data on the runner
         run: |
-          [ ! -e .local ] && [ ! -e "$VANILLA" ] || { echo "::error::vanilla data present"; exit 1; }
-          start=$(date +%s)
-          bash "$RUNNER_TEMP/builds.sh"
-          echo "builds without data: $(( $(date +%s) - start )) s"
-          mkdir -p "$RUNNER_TEMP/without"
-          mv .local/parity-target "$RUNNER_TEMP/without/parity-target"
-          mv target "$RUNNER_TEMP/without/target"
-          rmdir .local
+          for name in without control; do
+            [ ! -e .local ] && [ ! -e "$VANILLA" ] || { echo "::error::vanilla data present"; exit 1; }
+            start=$(date +%s)
+            bash "$RUNNER_TEMP/builds.sh"
+            echo "builds without data ($name): $(( $(date +%s) - start )) s"
+            mkdir -p "$RUNNER_TEMP/$name"
+            mv .local/parity-target "$RUNNER_TEMP/$name/parity-target"
+            mv target "$RUNNER_TEMP/$name/target"
+            rmdir .local
+          done
       - name: Fetch the vanilla data
         env:
           VANILLA_DATA_DEPLOY_KEY: ${{ secrets.VANILLA_DATA_DEPLOY_KEY }}
@@ -95,7 +101,7 @@ jobs:
           start=$(date +%s)
           bash "$RUNNER_TEMP/builds.sh"
           echo "builds with data: $(( $(date +%s) - start )) s"
-      - name: Compare the two builds, file by file
+      - name: Compare the builds, file by file
         run: |
           python3 - <<'EOF' | tee -a "$GITHUB_STEP_SUMMARY"
           import collections, hashlib, os
@@ -115,41 +121,60 @@ jobs:
           def digests(found):
               with ThreadPoolExecutor(16) as pool:
                   return dict(zip(found, pool.map(digest, found.values())))
-          pairs = [("parity-target", f"{temp}/without/parity-target", ".local/parity-target"),
-                   ("target (horizon-prepare)", f"{temp}/without/target", "target")]
+          def members(path):
+              """An ar archive's (an rlib's, a .a's) members: name -> sha256, numbered when repeated."""
+              data = open(path, "rb").read()
+              if not data.startswith(b"!<arch>\n"):
+                  return None
+              found, offset, names, seen = {}, 8, b"", collections.Counter()
+              while offset + 60 <= len(data):
+                  header = data[offset:offset + 60]
+                  name, size = header[:16].decode(errors="replace").strip(), int(header[48:58].decode().strip())
+                  body = data[offset + 60:offset + 60 + size]
+                  if name == "//":
+                      names = body
+                  elif name.startswith("/") and name[1:].isdigit():
+                      index = int(name[1:])
+                      name = names[index:names.index(b"\n", index)].decode(errors="replace").rstrip("/")
+                  seen[name] += 1
+                  found[f"{name}#{seen[name]}"] = hashlib.sha256(body).hexdigest()
+                  offset += 60 + size + (size & 1)
+              return found
+          def bytes_differing(x, y):
+              a, b = open(x, "rb").read(), open(y, "rb").read()
+              return sum(p != q for p, q in zip(a, b)) + abs(len(a) - len(b)), len(a), len(b)
+          roots = {"parity-target": ".local/parity-target", "target (horizon-prepare)": "target"}
           built = {}
-          for label, without, with_ in pairs:
-              a, b = digests(files(without)), digests(files(with_))
-              built.update({f"{with_}/{k}": v for k, v in b.items()})
-              only_a, only_b = sorted(set(a) - set(b)), sorted(set(b) - set(a))
-              changed = sorted(k for k in set(a) & set(b) if a[k] != b[k])
-              kinds = collections.Counter()
-              def kind(path):
-                  parts = path.split("/")
-                  if "incremental" in parts: return "incremental"
-                  if ".fingerprint" in parts: return ".fingerprint"
-                  if "build" in parts[:2]: return "build-script"
-                  return "/".join(parts[:2])
-              for path in only_a + only_b + changed:
-                  kinds[kind(path)] += 1
+          verdict = collections.Counter()
+          for label, with_ in roots.items():
+              sub = with_.split("/")[-1]
+              a = digests(files(f"{temp}/without/{sub}"))
+              control = digests(files(f"{temp}/control/{sub}"))
+              c = digests(files(with_))
+              built.update({f"{with_}/{k}": v for k, v in c.items()})
               print(f"\n### {label}\n")
-              print(f"{len(a)} files without data, {len(b)} with; {len(changed)} differ, {len(only_a)} only without, "
-                    f"{len(only_b)} only with\n")
-              print("| kind | files |\n| --- | ---: |")
-              for name, count in sorted(kinds.items()):
-                  print(f"| {name} | {count} |")
-              print("\n<details><summary>every differing file (incremental/ by session folder)</summary>\n\n```")
-              seen = set()
-              for tag, group in (("differs", changed), ("only without", only_a), ("only with", only_b)):
-                  for path in group:
-                      parts = path.split("/")
-                      if "incremental" in parts:
-                          index = parts.index("incremental")
-                          path = "/".join(parts[:index + 2]) + "/..."
-                      if (tag, path) not in seen:
-                          seen.add((tag, path))
-                          print(f"{tag}: {path}")
-              print("```\n</details>")
+              print(f"files: without data {len(a)}, control {len(control)}, with data {len(c)}; names only without "
+                    f"{len(set(a) - set(c))}, only with {len(set(c) - set(a))}; differ without/control "
+                    f"{sum(1 for k in a if k in control and a[k] != control[k])}, without/with "
+                    f"{sum(1 for k in a if k in c and a[k] != c[k])}\n")
+              print("```")
+              for key in sorted(k for k in a if k in c and a[k] != c[k]):
+                  in_control = key in control and control[key] != a[key]
+                  x, y, z = f"{temp}/without/{sub}/{key}", f"{temp}/control/{sub}/{key}", f"{with_}/{key}"
+                  ma, mc, mz = members(x), members(y), members(z)
+                  if ma is not None and mz is not None:
+                      changed = sorted(m for m in set(ma) | set(mz) if ma.get(m) != mz.get(m))
+                      unexplained = [m for m in changed if mc is None or mc.get(m) == ma.get(m)]
+                      kind = "control differs too" if not unexplained else f"members not differing in control: {unexplained}"
+                      detail = f"archive, members differing {len(changed)}/{len(mz)}: {changed[:6]}"
+                  else:
+                      count, la, lz = bytes_differing(x, z)
+                      kind = "control differs too" if in_control else "differs only with data"
+                      detail = f"{count} bytes differ, sizes {la} and {lz}"
+                  verdict[kind if kind == "control differs too" else "NOT explained by the control"] += 1
+                  print(f"{key}: {kind}; {detail}")
+              print("```")
+          print(f"\nverdict: {dict(verdict)}")
           data = {}
           for root in (os.environ["HORIZON_SHARED_SOURCE"], os.environ["HORIZON_PREPARED_CACHE"]):
               found = {k: v for k, v in files(root).items() if os.path.getsize(v) >= 64}
@@ -163,7 +188,7 @@ jobs:
       - name: References to the data's folders in the build
         run: |
           for needle in "$VANILLA" ".local/minecraft" ".local/horizon-client"; do
-            echo "files naming $needle: $(grep -rlaF -- "$needle" .local/parity-target | wc -l)"
+            echo "files naming $needle: with data $(grep -rlaF -- "$needle" .local/parity-target | wc -l),"               "without $(grep -rlaF -- "$needle" "$RUNNER_TEMP/without/parity-target" | wc -l)"
           done
 
   # The harness set (22 server-side, 10 client-probe, 3 game-starting), with each cache restored when there is one and
@@ -211,6 +236,17 @@ jobs:
       - name: Build and screen packages
         run: |
           . "$RUNNER_TEMP/clock.sh"
+          # Trial of a shorter setup: only the packages the image lacks (run 1: build-essential, cmake, libasound2-dev,
+          # libudev-dev, mesa-vulkan-drivers, libxkbcommon-x11-0; no crate builds with cmake), from the image's own
+          # package index. Then the full list as before, which finds them installed.
+          start=$(date +%s%N)
+          if sudo apt-get install -y -qq --no-install-recommends libasound2-dev libudev-dev mesa-vulkan-drivers \
+              libxkbcommon-x11-0 > /dev/null 2>&1; then
+            record "setup: apt-get install of the missing four, no update (ok)" "$start"
+          else
+            record "setup: apt-get install of the missing four, no update (FAILED)" "$start"
+          fi
+          echo "gcc: $(gcc --version | head -1); make: $(make --version | head -1)"
           start=$(date +%s%N)
           sudo apt-get update -qq
           record "setup: apt-get update" "$start"
@@ -241,6 +277,7 @@ jobs:
         run: |
           . "$RUNNER_TEMP/clock.sh"
           record "setup: rust-toolchain action" "$MARK"
+          echo "rustc after the action: $(rustc -V)"
           bash tools/ci/runner-env.sh
           record "runner setup (all of it, from the first step)" "$SETUP_START"
       - name: Timing wrappers
@@ -449,7 +486,7 @@ jobs:
           EOF
       - name: The probe build's files after the builds
         if: ${{ !cancelled() }}
-        run: find .local/parity-target target -type f -printf '%s %T@ %p\n' | sort -k3 > "$RUNNER_TEMP/target-after-builds"
+        run: find .local/parity-target target -type f -printf '%s %T@ %p\n' | LC_ALL=C sort > "$RUNNER_TEMP/target-after-builds"
       - name: 22 server-side harnesses
         if: ${{ !cancelled() }}
         env:
@@ -494,8 +531,8 @@ jobs:
       - name: What the harnesses wrote into the probe build
         if: ${{ !cancelled() }}
         run: |
-          find .local/parity-target target -type f -printf '%s %T@ %p\n' | sort -k3 > "$RUNNER_TEMP/target-after-harnesses"
-          comm -13 "$RUNNER_TEMP/target-after-builds" "$RUNNER_TEMP/target-after-harnesses" | cut -d' ' -f3- > "$RUNNER_TEMP/target-written"
+          find .local/parity-target target -type f -printf '%s %T@ %p\n' | LC_ALL=C sort > "$RUNNER_TEMP/target-after-harnesses"
+          LC_ALL=C comm -13 "$RUNNER_TEMP/target-after-builds" "$RUNNER_TEMP/target-after-harnesses" | cut -d' ' -f3- > "$RUNNER_TEMP/target-written"
           echo "files added or changed by the harnesses: $(wc -l < "$RUNNER_TEMP/target-written")"
           sed 's#/[^/]*$##' "$RUNNER_TEMP/target-written" | sort | uniq -c | sort -rn | head -40
           echo "outside incremental/, .fingerprint/ and deps/ (first 60):"
@@ -615,3 +652,63 @@ jobs:
               echo "probe target $profile/$part KiB $(du -sk ".local/parity-target/$profile/$part" 2>/dev/null | cut -f1)"
             done
           done
+
+  # The game built twice (run 1: 208 s more): `-p horizon-client-lib` on the command line turns on that crate's
+  # `default` feature, which it lacks as a dependency of horizon-game alone, so horizon-client-lib, horizon-client and
+  # horizon-game compile again. The fix tried here, in this job's checkout only: the game's default features turn
+  # horizon-client-lib's `default` on too (no code reads `feature = "default"`). Then both selections must be one build.
+  game-features:
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends build-essential pkg-config libasound2-dev libudev-dev > /dev/null
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable, 2026-11
+        with:
+          toolchain: stable
+      - name: The fix
+        run: |
+          python3 - <<'EOF'
+          from pathlib import Path
+          client = Path("crates/horizon-client/Cargo.toml")
+          text = client.read_text()
+          old = 'horizon-extras = ["friends"]\n'
+          assert text.count(old) == 1
+          client.write_text(text.replace(old, old + 'client-lib-default = ["horizon-client-lib/default"]\n'))
+          game = Path("crates/horizon-game/Cargo.toml")
+          text = game.read_text()
+          old = 'default = ["audio", "controllers", "horizon-extras"]\n'
+          assert text.count(old) == 1
+          game.write_text(text.replace(old, 'default = ["audio", "controllers", "horizon-extras", "horizon-client/client-lib-default"]\n'))
+          EOF
+          git diff
+      - name: The two selections' features
+        run: |
+          for selection in "-p horizon-game -p horizon-client-lib" "-p horizon-game"; do
+            # shellcheck disable=SC2086
+            cargo tree --locked -e normal,build,features $selection -f '{p} {f}' --prefix none | sort -u > "$RUNNER_TEMP/tree-${selection// /_}.txt"
+          done
+          echo "lines in only one selection: $(comm -3 "$RUNNER_TEMP/tree--p_horizon-game_-p_horizon-client-lib.txt" "$RUNNER_TEMP/tree--p_horizon-game.txt" | grep -c . || true)"
+          comm -3 "$RUNNER_TEMP/tree--p_horizon-game_-p_horizon-client-lib.txt" "$RUNNER_TEMP/tree--p_horizon-game.txt" | head -20
+      - name: Both builds, timed
+        run: |
+          export CARGO_TARGET_DIR="$PWD/.local/parity-target" CARGO_PROFILE_RELEASE_LTO=false \
+            CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_PROFILE_RELEASE_INCREMENTAL=true CARGO_PROFILE_DEV_OPT_LEVEL=3
+          start=$(date +%s)
+          cargo build --locked --profile fast -p horizon-game -p horizon-client-lib --bins 2> "$RUNNER_TEMP/first.err"
+          first=$(( $(date +%s) - start ))
+          start=$(date +%s)
+          cargo build --locked --profile fast -p horizon-game --bin horizon-client 2> "$RUNNER_TEMP/second.err"
+          second=$(( $(date +%s) - start ))
+          {
+            echo "| Build, with the fix | Seconds | Crates compiled |"
+            echo "| --- | ---: | ---: |"
+            echo "| -p horizon-game -p horizon-client-lib --bins | $first | $(grep -c 'Compiling ' "$RUNNER_TEMP/first.err" || true) |"
+            echo "| then -p horizon-game --bin horizon-client | $second | $(grep -c 'Compiling ' "$RUNNER_TEMP/second.err" || true) |"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          grep 'Compiling ' "$RUNNER_TEMP/second.err" | head -20 || true
