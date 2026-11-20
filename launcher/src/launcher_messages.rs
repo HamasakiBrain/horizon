@@ -37,12 +37,15 @@ impl Launcher {
                     }
                     if let Ok(list) = &r {
                         horizon_launcher::nightly::note_published(list);
+                        // Nightlies of one day are ordered by when they came out, known now.
+                        self.installed = backend::installed();
                     }
                     self.releases = r.map_or_else(Load::Failed, Load::Ready);
                     self.notes.clear();
                 }
                 Msg::ReleasesFromNetwork(list) => {
                     horizon_launcher::nightly::note_published(&list);
+                    self.installed = backend::installed();
                     self.stable_failed = None;
                     self.releases = Load::Ready(list);
                     self.notes.clear();
@@ -206,24 +209,48 @@ impl Launcher {
                             if self.updates.horizon.as_ref().is_some_and(|r| r.tag == tag) {
                                 self.updates.horizon = None;
                             }
-                            // An instance's own version leaves the other instances on theirs.
-                            // Judged now, not when the download started: a version picked on
-                            // Versions meanwhile stays picked.
                             let before: Vec<String> = self
                                 .installed
                                 .iter()
                                 .filter(|t| **t != tag)
                                 .cloned()
                                 .collect();
-                            let select = as_update.is_none_or(|_| {
-                                backend::select_after_update(
-                                    self.settings.selected.as_deref(),
-                                    &before,
-                                )
-                            }) && (!for_instance || self.launcher_version().is_none());
-                            if select {
-                                self.settings.selected = Some(tag);
+                            // Judged on the selection as saved now, not when the download
+                            // started: a version picked on Versions or with `settings
+                            // selected-version` meanwhile stays picked. A file from before
+                            // `following` is read against the list before this install.
+                            // A saved selection that isn't installed is the one the window
+                            // replaced at start: the window's stays then.
+                            let saved = Settings::load_for_install(&before);
+                            if self.settings_save_error.is_none()
+                                && saved
+                                    .selected
+                                    .as_ref()
+                                    .is_some_and(|s| self.installed.contains(s))
+                            {
+                                self.settings.selection_from(&saved);
                             }
+                            // An instance's own version leaves the selection where it is, unless
+                            // an instance on the Nightly channel is pinned to it and the
+                            // selection follows the newest. Home's Stable update never moves it.
+                            let instance = (for_instance || stable.is_some()).then(|| {
+                                stable.is_none()
+                                    && horizon_launcher::instances::list().iter().any(|i| {
+                                        i.java.is_none()
+                                            && i.channel
+                                                == horizon_launcher::instances::Channel::Nightly
+                                            && i.version.as_deref() == Some(tag.as_str())
+                                    })
+                            });
+                            self.settings.apply_install(
+                                &tag,
+                                &before,
+                                &self.installed,
+                                backend::InstallCause {
+                                    update: as_update.is_some(),
+                                    instance,
+                                },
+                            );
                             // Pruning reads settings from disk: protect the selection only once
                             // it has been saved there. A failed save leaves all versions in place.
                             if self.save_settings() {
@@ -251,12 +278,10 @@ impl Launcher {
                 Msg::Removed(tag, result) => {
                     self.removing.retain(|t| *t != tag);
                     self.installed = backend::installed();
-                    let selected = if self.settings_save_error.is_some() {
-                        self.settings.selected.take()
-                    } else {
-                        Settings::load().selected
-                    };
-                    self.settings.selected = selection_after_removal(&self.installed, selected);
+                    if self.settings_save_error.is_none() {
+                        self.settings.selection_from(&Settings::load());
+                    }
+                    self.settings.keep_installed_selection(&self.installed);
                     if let Err(e) = result {
                         self.install_error = Some((tag, e));
                     }
@@ -268,7 +293,7 @@ impl Launcher {
                     self.installed = backend::installed();
                     match result {
                         // `build_import::import` saved the selection; this keeps the window's copy.
-                        Ok(tag) => self.settings.selected = Some(tag),
+                        Ok(tag) => self.settings.pick(tag),
                         Err(e) => self.import_error = Some(e),
                     }
                 }
@@ -432,7 +457,12 @@ impl Launcher {
                             self.native_look_again(ended.as_deref(), error.as_deref());
                         }
                         Job::Client => {
-                            self.client = None;
+                            // The exit thread reaped the game; its child keeps the status.
+                            let native_crash = self
+                                .client
+                                .take()
+                                .and_then(|client| client.child.lock().ok()?.try_wait().ok()?)
+                                .is_some_and(backend::native_crash_exit);
                             // Any session file the game didn't read (it crashed first).
                             account::discard_unread_sessions();
                             self.come_back(cx);
@@ -460,17 +490,17 @@ impl Launcher {
                                 .client_started
                                 .take()
                                 .and_then(|since| backend::crash_report_since(&home, since));
-                            let switched = if error.is_some() && report.is_none() {
-                                self.switched_from_vulkan()
+                            let switched = if native_crash && report.is_none() {
+                                self.switched_after_start_crash()
                             } else {
                                 None
                             };
-                            if let Some(api) = switched {
+                            if let Some((crashed, api)) = switched {
                                 self.client_error = Some(trf(
-                                    "Horizon's Vulkan renderer crashed while starting on this \
+                                    "Horizon's {crashed} renderer crashed while starting on this \
                                      graphics card, so the game now uses {api}. Press Play to \
                                      start it again. Video Settings > Graphics API switches back.",
-                                    &[("api", api)],
+                                    &[("crashed", crashed), ("api", api)],
                                 ));
                             } else if error.is_some() || report.is_some() {
                                 let summary = report
