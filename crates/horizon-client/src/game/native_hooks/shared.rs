@@ -2998,7 +2998,14 @@ impl Game<'_> {
     /// A data slot of window `window`'s menu (`ContainerSetData`); false
     /// when no mod screen is showing for that window.
     pub(super) fn native_screen_data(&mut self, window: i32, id: i16, value: i16) -> bool {
-        if self.shown_native_screen().is_none() {
+        // The container screen, shown or under a mod's own screen
+        // (`container_screen`): its data stays current for the return.
+        let open = self.container_screen() == Screen::Inventory
+            && self
+                .mod_screen
+                .as_ref()
+                .is_some_and(|s| self.container == Some(s.key));
+        if !open {
             return false;
         }
         self.mod_screen
@@ -4687,6 +4694,33 @@ mod tests {
             assert!(!body.contains("return true"), "{head}");
         }
     }
+    /// A data slot the server sends while a mod's own screen covers the
+    /// container keeps that container's screen current for the return.
+    #[test]
+    #[ignore = "daily"]
+    fn container_data_under_a_mod_screen_reaches_the_covered_screen() {
+        use crate::game::Screen;
+        crate::game::native_entity_refs::tests::with_client_game(|game| {
+            game.container = Some((1, 2, 3));
+            game.mod_screen = Some(super::OpenNativeScreen {
+                layout_revision: 0,
+                key: (1, 2, 3),
+                window: 4,
+                block: "gtmod:machine".into(),
+                screen: mod_api::Screen::default(),
+                data: Vec::new(),
+                extra: None,
+            });
+            game.screen = Screen::Mod;
+            game.mod_screen_under = Some(Screen::Inventory);
+            assert!(game.native_screen_data(4, 1, 7));
+            assert_eq!(game.mod_screen.as_ref().unwrap().data, [0, 7]);
+            // Over the world, a mod's screen covers no container.
+            game.mod_screen_under = None;
+            assert!(!game.native_screen_data(4, 1, 9));
+        });
+    }
+
     /// A data packet for an old window leaves the open mod screen alone.
     #[test]
     fn mod_screen_data_is_its_windows_only() {
