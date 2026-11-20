@@ -1,13 +1,40 @@
 import datetime as dt
 import os
 import subprocess
+import sys
 import textwrap
+import tomllib
 from pathlib import Path
 import tempfile
 import unittest
 from unittest import mock
 
 from tools import release_train as train
+
+sys.path.insert(0, str(train.ROOT / "tools/ci/vendor/pyyaml-6.0.3.zip"))
+import yaml  # noqa: E402
+
+
+def launcher_path_crates():
+    """The crates/ folders the launcher's manifest reaches through `path`: every dependency kind of the launcher
+    (its tests build there too), then normal and build dependencies (what Cargo builds of a dependency)."""
+    launcher = (train.ROOT / "launcher").resolve()
+    seen, todo = set(), [launcher]
+    while todo:
+        folder = todo.pop()
+        if folder in seen:
+            continue
+        seen.add(folder)
+        manifest = tomllib.loads((folder / "Cargo.toml").read_text(encoding="utf-8"))
+        kinds = ["dependencies", "build-dependencies"] + (["dev-dependencies"] if folder == launcher else [])
+        tables = [manifest.get(kind, {}) for kind in kinds]
+        tables += [target.get(kind, {}) for target in manifest.get("target", {}).values() for kind in kinds]
+        todo += [(folder / spec["path"]).resolve() for table in tables for spec in table.values()
+                 if isinstance(spec, dict) and "path" in spec]
+    folders = {folder.relative_to(train.ROOT.resolve()).as_posix() + "/" for folder in seen}
+    outside = {folder for folder in folders if not folder.startswith(("crates/", "launcher/"))}
+    assert not outside, f"the launcher builds path crates outside crates/: {sorted(outside)}"
+    return {folder for folder in folders if folder.startswith("crates/")}
 
 NOW = dt.datetime(2026, 10, 15, 12, 0, tzinfo=dt.timezone.utc)
 
@@ -110,6 +137,18 @@ class ReleaseTrainTests(unittest.TestCase):
         self.assertEqual(prs[-1]["merged_at"], NOW - dt.timedelta(hours=9))
         api.assert_called_once()
         self.assertEqual(api.call_args.args[:4], ("api", "graphql", "--paginate", "--slurp"))
+
+    def test_the_launcher_paths_are_every_crate_the_launcher_builds_in(self):
+        listed = {path for path in train.LAUNCHER_PATHS if path.startswith("crates/")}
+        self.assertEqual(listed, launcher_path_crates(),
+                         "LAUNCHER_PATHS in tools/release_train.py must list launcher/Cargo.toml's path crates")
+
+    def test_the_launcher_workflow_runs_for_every_launcher_path(self):
+        workflow = yaml.safe_load((train.ROOT / ".github/workflows/launcher.yml").read_text(encoding="utf-8"))
+        triggers = workflow.get("on", workflow.get(True))
+        paths = set(triggers["push"]["paths"]) - {".github/workflows/launcher.yml"}
+        self.assertEqual(paths, {path + "**" for path in train.LAUNCHER_PATHS},
+                         "launcher.yml's push paths must be tools/release_train.py's LAUNCHER_PATHS")
 
     def test_launcher_decision_shell_fails_closed_and_succeeds_normally(self):
         workflow = (train.ROOT / ".github/workflows/launcher.yml").read_text()

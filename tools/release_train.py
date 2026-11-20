@@ -68,19 +68,46 @@ OLD_LAUNCHER_PREFIX = "launcher-v"
 
 # What players run. Documentation (*.md), tests, benchmarks and harness probes (examples/) never count.
 GAME_PATHS = ["crates/", "xtask/", "packaging/", "Cargo.toml", "Cargo.lock", "research-lock.json"]
-# Every crate the launcher builds in (cargo metadata --manifest-path launcher/Cargo.toml: the path packages).
+# Every crate the launcher builds in: the path packages its manifest reaches, through dependencies of any kind of the
+# launcher and normal and build dependencies of each crate after it (tests/test_release_train.py fails when they differ).
 LAUNCHER_PATHS = [
     "launcher/",
+    "crates/horizon-addresses/",
+    "crates/horizon-anticheat/",
+    "crates/horizon-assets/",
     "crates/horizon-bench/",
+    "crates/horizon-chat-filter/",
+    "crates/horizon-core/",
+    "crates/horizon-cosmetics/",
     "crates/horizon-friends/",
+    "crates/horizon-game-discovery/",
+    "crates/horizon-guest-stack/",
+    "crates/horizon-hooks/",
+    "crates/horizon-java-properties/",
     "crates/horizon-mcp/",
     "crates/horizon-mod-api-gen/",
+    "crates/horizon-mod-api-macros/",
     "crates/horizon-mod-package/",
+    "crates/horizon-mod-point-emit/",
+    "crates/horizon-mod-point-shape/",
+    "crates/horizon-mod-runtime/",
+    "crates/horizon-mod-source/",
+    "crates/horizon-mod-surface/",
+    "crates/horizon-mod-vocab/",
+    "crates/horizon-perf-format/",
+    "crates/horizon-platform/",
     "crates/horizon-port-pack/",
     "crates/horizon-prepare/",
+    "crates/horizon-protocol/",
     "crates/horizon-release-sign/",
+    "crates/horizon-server-files/",
+    "crates/horizon-server-launch/",
+    "crates/horizon-shader-api/",
     "crates/horizon-system/",
+    "crates/horizon-telemetry/",
     "crates/horizon-theme/",
+    "crates/horizon-threads/",
+    "crates/horizon-world/",
     # Its icon, its menu entries and its AppImage are compiled or packaged into a release
     # (launcher/build.rs, src/desktop.rs, packaging/linux/appimage.sh).
     "packaging/icons/",
