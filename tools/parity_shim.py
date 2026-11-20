@@ -29,6 +29,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 
 try:
     from . import file_lock
@@ -66,45 +67,60 @@ def enter():
     os.environ["PATH"] = os.environ.get("PARITY_SHIM_REAL_PATH", "")
 
 
-def create(path):
-    """Create the hash database once. Shims starting together on an empty cache each switched it to WAL, and those
-    that lost failed ("database is locked": 63 of 960 on Linux, 2026-11-20), failing their harness's first run.
-    One creates it under a lock, whole, and renames it into place; the others wait for the lock, then find it.
-    A database switched to WAL but left without its table (an older shim stopped between the two) is completed."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path.with_name("hashes.lock"), "a+b") as handle:
-        file_lock.lock(handle)
-        if in_wal_mode(path) and has_table(path):
-            return
-        # A database from before WAL, or before this lock, is switched and completed in place.
-        target = path if path.exists() else path.with_name(f"hashes.{os.getpid()}.sqlite")
-        db = sqlite3.connect(target, timeout=60)
-        db.execute("pragma journal_mode=wal")
-        db.execute("create table if not exists hashes (path text primary key, size int, mtime int, sha text)")
-        db.commit()
-        db.close()  # the last connection: its -wal and -shm files go with it
-        if target != path:
-            target.replace(path)
+# How long a shim waits for the hash database to be ready before it runs its oracle without the cache. Creating it
+# takes milliseconds (a few writes and fsyncs); the rest is waiting for the shims ahead of it, each holding the lock
+# for as long. Well past that, a holder is stuck (suspended, or on a disk that stalls): waiting longer gains nothing.
+INIT_SECONDS = 15
+TABLE = "select 1 from sqlite_master where type = 'table' and name = 'hashes'"
+
+
+class Uncached(Exception):
+    """The hash database was not ready in time: this run goes to the real program, as with PARITY_JAVA_CACHE=0."""
 
 
 def in_wal_mode(path):
     """The database exists and is in WAL mode: its header's read and write versions are 2."""
     try:
         with open(path, "rb") as stream:
-            return stream.read(20)[18:20] == b"\x02\x02"
+            return stream.read(20)[18:20] == b""
     except OSError:
         return False
 
 
-TABLE = "select 1 from sqlite_master where type = 'table' and name = 'hashes'"
+def busy(error):
+    return isinstance(error, sqlite3.OperationalError) and any(word in str(error) for word in ("locked", "busy"))
 
 
-def has_table(path):
-    db = sqlite3.connect(path, timeout=60)
-    try:
-        return db.execute(TABLE).fetchone() is not None
-    finally:
-        db.close()
+def prepare(path, deadline):
+    """Make the hash database ready, in place: created if missing, switched to WAL, its table made; each step does
+    nothing if already done. Shims starting together on an empty cache each switched it to WAL, and those that lost
+    failed ("database is locked": 63 of 960 on Linux, 2026-11-20), failing their harness's first run. Now one does it
+    under hashes.lock while the others wait for the lock. A shim from before this lock ignores it: meeting one
+    mid-way, this retries until the deadline. The file is never replaced, as another process may have it open."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path.with_name("hashes.lock"), "a+b") as handle:
+        while not file_lock.lock(handle, wait=False):
+            if time.monotonic() >= deadline:
+                raise Uncached("another process held hashes.lock throughout")
+            time.sleep(0.02)
+        while True:
+            try:
+                db = sqlite3.connect(path, timeout=max(0.0, deadline - time.monotonic()))
+                try:
+                    # Answers the mode it is in: still another while a connection keeps it from switching.
+                    if db.execute("pragma journal_mode=wal").fetchone()[0] == "wal":
+                        db.execute("create table if not exists hashes (path text primary key, size int, mtime int, "
+                                   "sha text)")
+                        db.commit()
+                        return
+                finally:
+                    db.close()
+            except sqlite3.OperationalError as error:
+                if not busy(error):
+                    raise
+            if time.monotonic() >= deadline:
+                raise Uncached("the database stayed locked")
+            time.sleep(0.02)
 
 
 class Hashes:
@@ -115,10 +131,14 @@ class Hashes:
         # A warm cache: the header and one schema query, no lock.
         if in_wal_mode(path):
             self.db = sqlite3.connect(path, timeout=60)
-            if self.db.execute(TABLE).fetchone():
-                return
+            try:
+                if self.db.execute(TABLE).fetchone():
+                    return
+            except sqlite3.OperationalError as error:
+                if not busy(error):
+                    raise
             self.db.close()
-        create(path)
+        prepare(path, time.monotonic() + INIT_SECONDS)
         self.db = sqlite3.connect(path, timeout=60)
 
     def file(self, path):
@@ -244,7 +264,12 @@ def main():
     enter()
     if os.environ.get("PARITY_JAVA_CACHE") == "0" or "-version" in arguments or "--version" in arguments:
         os.execv(program, [program, *arguments])
-    hashes = Hashes()
+    try:
+        hashes = Hashes()
+    except Uncached as reason:
+        print(f"parity shim: the oracle cache in {CACHE} was not ready within {INIT_SECONDS} s ({reason}): "
+              f"{name} runs without it", file=sys.stderr, flush=True)
+        os.execv(program, [program, *arguments])
     stdin = stdin_identity(hashes)
     if stdin is None:
         os.execv(program, [program, *arguments])
