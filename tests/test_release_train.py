@@ -15,26 +15,52 @@ sys.path.insert(0, str(train.ROOT / "tools/ci/vendor/pyyaml-6.0.3.zip"))
 import yaml  # noqa: E402
 
 
-def launcher_path_crates():
-    """The crates/ folders the launcher's manifest reaches through `path`: every dependency kind of the launcher
-    (its tests build there too), then normal and build dependencies (what Cargo builds of a dependency)."""
-    launcher = (train.ROOT / "launcher").resolve()
-    seen, todo = set(), [launcher]
+def owning_workspace(folder):
+    """The manifest of the workspace a package belongs to: the nearest Cargo.toml at or above it with [workspace]."""
+    for candidate in (folder, *folder.parents):
+        manifest = candidate / "Cargo.toml"
+        if manifest.exists() and "workspace" in tomllib.loads(manifest.read_text(encoding="utf-8")):
+            return manifest
+    return None
+
+
+def path_closure(start):
+    """The package folders `start` reaches through `path`: every dependency kind of `start` (its tests build there
+    too), then normal and build dependencies (what Cargo builds of a dependency). An entry with `workspace = true`
+    takes its `path` from the owning workspace's [workspace.dependencies], relative to that manifest."""
+    start = start.resolve()
+    seen, todo = set(), [start]
     while todo:
         folder = todo.pop()
         if folder in seen:
             continue
         seen.add(folder)
         manifest = tomllib.loads((folder / "Cargo.toml").read_text(encoding="utf-8"))
-        kinds = ["dependencies", "build-dependencies"] + (["dev-dependencies"] if folder == launcher else [])
+        kinds = ["dependencies", "build-dependencies"] + (["dev-dependencies"] if folder == start else [])
         tables = [manifest.get(kind, {}) for kind in kinds]
         tables += [target.get(kind, {}) for target in manifest.get("target", {}).values() for kind in kinds]
-        todo += [(folder / spec["path"]).resolve() for table in tables for spec in table.values()
-                 if isinstance(spec, dict) and "path" in spec]
-    folders = {folder.relative_to(train.ROOT.resolve()).as_posix() + "/" for folder in seen}
+        for table in tables:
+            for name, spec in table.items():
+                if not isinstance(spec, dict):
+                    continue
+                if spec.get("workspace") is True:
+                    workspace = owning_workspace(folder)
+                    inherited = tomllib.loads(workspace.read_text(encoding="utf-8")).get("workspace", {})
+                    spec = inherited.get("dependencies", {}).get(name)
+                    if isinstance(spec, dict) and "path" in spec:
+                        todo.append((workspace.parent / spec["path"]).resolve())
+                elif "path" in spec:
+                    todo.append((folder / spec["path"]).resolve())
+    return seen
+
+
+def launcher_path_crates():
+    """The crates/ folders the launcher's manifest reaches through `path`."""
+    folders = {folder.relative_to(train.ROOT.resolve()).as_posix() + "/" for folder in path_closure(train.ROOT / "launcher")}
     outside = {folder for folder in folders if not folder.startswith(("crates/", "launcher/"))}
     assert not outside, f"the launcher builds path crates outside crates/: {sorted(outside)}"
     return {folder for folder in folders if folder.startswith("crates/")}
+
 
 NOW = dt.datetime(2026, 10, 15, 12, 0, tzinfo=dt.timezone.utc)
 
@@ -165,11 +191,47 @@ class ReleaseTrainTests(unittest.TestCase):
     def test_every_launcher_release_path_runs_the_launcher_checks(self):
         self.assertLessEqual(set(train.LAUNCHER_RELEASE_PATHS), set(train.LAUNCHER_PATHS))
 
+    def test_the_closure_follows_inline_and_workspace_inherited_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+
+            def write(folder, text):
+                (root / folder).mkdir(parents=True, exist_ok=True)
+                (root / folder / "Cargo.toml").write_text(textwrap.dedent(text))
+
+            write(".", """
+                [workspace]
+                members = ["crates/*"]
+                [workspace.dependencies]
+                inherited = { path = "crates/inherited" }
+            """)
+            write("app", """
+                [package]
+                name = "app"
+                [workspace]
+                [dependencies]
+                middle = { path = "../crates/middle" }
+                [dev-dependencies]
+                test-only = { path = "../crates/test-only" }
+            """)
+            write("crates/middle", """
+                [package]
+                name = "middle"
+                [dependencies]
+                inherited = { workspace = true }
+                [dev-dependencies]
+                not-built = { path = "../not-built" }
+            """)
+            for name in ("inherited", "test-only", "not-built"):
+                write(f"crates/{name}", f'[package]\nname = "{name}"\n')
+            self.assertEqual({folder.relative_to(root).as_posix() for folder in path_closure(root / "app")},
+                             {"app", "crates/middle", "crates/inherited", "crates/test-only"})
+
     def test_the_launcher_workflow_runs_for_every_launcher_path(self):
         workflow = yaml.safe_load((train.ROOT / ".github/workflows/launcher.yml").read_text(encoding="utf-8"))
         triggers = workflow.get("on", workflow.get(True))
-        paths = set(triggers["push"]["paths"]) - {".github/workflows/launcher.yml"}
-        self.assertEqual(paths, {path + "**" for path in train.LAUNCHER_PATHS},
+        self.assertEqual(set(triggers["push"]["paths"]),
+                         {path + "**" for path in train.LAUNCHER_PATHS} | {".github/workflows/launcher.yml"},
                          "launcher.yml's push paths must be tools/release_train.py's LAUNCHER_PATHS")
 
     def test_launcher_decision_shell_fails_closed_and_succeeds_normally(self):
