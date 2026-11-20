@@ -9352,6 +9352,9 @@ impl Game<'_> {
         self.send(S::ContainerClose(play::ContainerClose { container }));
     }
     fn remote_close_local(&mut self) {
+        // The menu a mod's own screen was over is gone: Escape must not return
+        // to it, even when a screen hook keeps the mod's screen open.
+        self.mod_screen_under = None;
         // `Gui.setScreen` clears the focus of the screen it takes down: the
         // container's keyboard focus must not outlive it (a Tab bound to the
         // inventory moves the focus and closes the container in one press).

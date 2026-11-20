@@ -5151,6 +5151,9 @@ impl Game<'_> {
     }
 
     pub(super) fn close_container(&mut self) {
+        // A mod's own screen over this container has nothing to return to now,
+        // even if a screen hook keeps it open.
+        self.mod_screen_under = None;
         // `Gui.setScreen` clears the old screen's focus before it goes: the
         // key that closed the container (Tab bound to the inventory) has
         // already moved the focus, and it must not outlive the screen.

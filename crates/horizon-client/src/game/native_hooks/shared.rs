@@ -3556,13 +3556,14 @@ fn box_meets(b: &horizon_core::geometry::Aabb, min: [f64; 3], max: [f64; 3]) -> 
         && hi.z > min[2]
 }
 
-/// What `mod_screen_open(mod_id)` does over `screen` (`blocked`: an
-/// overlay, the title screen, no window or no player; `owner`'s own screen
-/// open): `None` opens it (over the world, or over a container screen it
-/// returns to), `Some` answers without changing anything (true: `mod_id`'s
-/// is already open).
+/// What `mod_screen_open(mod_id)` (`over`: `MOD_SCREEN_OVER_WORLD`) or
+/// `mod_screen_open_over_container(mod_id)` (`MOD_SCREEN_OVER_CONTAINER`) does
+/// over `screen` (`blocked`: an overlay, the title screen, no window or no
+/// player; `owner`'s own screen open): `None` opens it, `Some` answers without
+/// changing anything (true: `mod_id`'s is already open).
 fn mod_screen_opens(
     screen: Screen,
+    over: &[Screen],
     blocked: bool,
     owner: Option<&str>,
     mod_id: &str,
@@ -3570,15 +3571,16 @@ fn mod_screen_opens(
     if screen == Screen::Mod {
         return Some(owner == Some(mod_id));
     }
-    let over = matches!(
-        screen,
-        Screen::Playing | Screen::Inventory | Screen::Creative
-    );
-    if !over || blocked {
+    if !over.contains(&screen) || blocked {
         return Some(false);
     }
     None
 }
+/// The screen `mod_screen_open` opens a mod's own screen over: the world.
+const MOD_SCREEN_OVER_WORLD: &[Screen] = &[Screen::Playing];
+/// The container screens `mod_screen_open_over_container` opens a mod's own
+/// screen over, keeping them behind it.
+const MOD_SCREEN_OVER_CONTAINER: &[Screen] = &[Screen::Inventory, Screen::Creative];
 
 fn client_packet_view(packet: &horizon_protocol::packets::play::Clientbound) -> ClientPacket {
     use horizon_protocol::packets::play::Clientbound;
@@ -4443,27 +4445,39 @@ mod tests {
         assert_eq!(game.screen_hovered_item(), None);
     }
 
-    /// A mod's own screen opens over the world or a container screen, never
+    /// `mod_screen_open` opens a mod's own screen only over the world and
+    /// `mod_screen_open_over_container` only over a container screen, never
     /// over another screen, an overlay (the title screen, a book, loading, no
     /// window) or another mod's; opening it again is a no-op.
     #[test]
-    fn a_mod_screen_opens_only_over_the_world_or_a_container() {
-        use super::{Screen, mod_screen_opens};
-        for over in [Screen::Playing, Screen::Inventory, Screen::Creative] {
-            assert_eq!(mod_screen_opens(over, false, None, "a"), None);
-            assert_eq!(mod_screen_opens(over, true, None, "a"), Some(false));
+    fn a_mod_screen_opens_only_over_the_screens_its_call_names() {
+        use super::{
+            MOD_SCREEN_OVER_CONTAINER as CONTAINER, MOD_SCREEN_OVER_WORLD as WORLD, Screen,
+            mod_screen_opens,
+        };
+        let opens = |screen, over| mod_screen_opens(screen, over, false, None, "a");
+        assert_eq!(opens(Screen::Playing, WORLD), None);
+        assert_eq!(opens(Screen::Inventory, CONTAINER), None);
+        assert_eq!(opens(Screen::Creative, CONTAINER), None);
+        // The published call keeps refusing a container screen.
+        assert_eq!(opens(Screen::Inventory, WORLD), Some(false));
+        assert_eq!(opens(Screen::Creative, WORLD), Some(false));
+        assert_eq!(opens(Screen::Playing, CONTAINER), Some(false));
+        for over in [WORLD, CONTAINER] {
+            for other in [Screen::Paused, Screen::Chat, Screen::Options, Screen::Dead] {
+                assert_eq!(opens(other, over), Some(false));
+            }
+            let screen = over[0];
+            assert_eq!(mod_screen_opens(screen, over, true, None, "a"), Some(false));
+            assert_eq!(
+                mod_screen_opens(Screen::Mod, over, false, Some("a"), "a"),
+                Some(true)
+            );
+            assert_eq!(
+                mod_screen_opens(Screen::Mod, over, false, Some("b"), "a"),
+                Some(false)
+            );
         }
-        for other in [Screen::Paused, Screen::Chat, Screen::Options, Screen::Dead] {
-            assert_eq!(mod_screen_opens(other, false, None, "a"), Some(false));
-        }
-        assert_eq!(
-            mod_screen_opens(Screen::Mod, false, Some("a"), "a"),
-            Some(true)
-        );
-        assert_eq!(
-            mod_screen_opens(Screen::Mod, false, Some("b"), "a"),
-            Some(false)
-        );
     }
 
     /// The characters a `ScreenEvent.CharacterTyped.Pre` sees are the

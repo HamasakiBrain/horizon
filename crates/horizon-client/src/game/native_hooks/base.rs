@@ -4620,19 +4620,31 @@ impl Game<'_> {
         let [a, r, g, b] = argb.to_be_bytes();
         batch.fill_quad(&self.gui.atlas, points, rgba(r, g, b, a));
     }
-    /// Opens a screen of mod `mod_id`'s own over the world or over the open
-    /// container screen (`ClientHost::mod_screen_open`; the container's menu
-    /// stays open and Escape returns to it): see `show_mod_screen`. True when
-    /// it is open: false while another screen is (or another mod's), over the
-    /// title screen, a book, a sign editor, a dialog or a prompt, while the
-    /// world loads, and anywhere but the window's own client (the server
-    /// thread, a dedicated server).
+    /// Opens a screen of mod `mod_id`'s own over the world
+    /// (`ClientHost::mod_screen_open`): see `show_mod_screen`. True when it is
+    /// open: false while another screen is (or another mod's; a container
+    /// screen too: `mod_screen_open_over_container`), over the title screen, a
+    /// book, a sign editor, a dialog or a prompt, while the world loads, and
+    /// anywhere but the window's own client (the server thread, a dedicated
+    /// server).
     pub(in crate::game) fn mod_screen_open(&mut self, mod_id: &str) -> bool {
+        self.open_mod_screen_over(mod_id, MOD_SCREEN_OVER_WORLD)
+    }
+    /// Opens a screen of mod `mod_id`'s own over the open container screen
+    /// (`ClientHost::mod_screen_open_over_container`; the container's menu
+    /// stays open and Escape returns to it): see `show_mod_screen`. False over
+    /// the world and wherever `mod_screen_open` is refused.
+    pub(in crate::game) fn mod_screen_open_over_container(&mut self, mod_id: &str) -> bool {
+        self.open_mod_screen_over(mod_id, MOD_SCREEN_OVER_CONTAINER)
+    }
+    /// `mod_screen_open` and `mod_screen_open_over_container`: opens mod
+    /// `mod_id`'s own screen if the open screen is one of `over`.
+    fn open_mod_screen_over(&mut self, mod_id: &str, over: &[Screen]) -> bool {
         // What `screen_hooks_open` would refuse over the world: the mod's
         // screen would be up with no hook to draw or click it.
         let blocked = self.renderer.is_none() || self.mod_screen_blocked();
         let owner = self.mod_screen();
-        if let Some(open) = mod_screen_opens(self.screen, blocked, owner, mod_id) {
+        if let Some(open) = mod_screen_opens(self.screen, over, blocked, owner, mod_id) {
             return open;
         }
         self.show_mod_screen(mod_id)
