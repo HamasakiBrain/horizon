@@ -201,6 +201,7 @@ jobs:
   # The harness set (22 server-side, 10 client-probe, 3 game-starting), with each cache restored when there is one and
   # saved when there was none, every part timed: the first run is the cold one, later runs the warm ones.
   harnesses:
+    if: false # measured in runs 44630142730 to 44654401282
     runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 100
     env:
@@ -748,3 +749,90 @@ jobs:
             echo "| then -p horizon-game --bin horizon-client | $second | $(grep -c 'Compiling ' "$RUNNER_TEMP/second.err" || true) |"
           } | tee -a "$GITHUB_STEP_SUMMARY"
           grep 'Compiling ' "$RUNNER_TEMP/second.err" | head -20 || true
+
+  # The game-built-once fix (fix/game-built-once-for-parity, 7a53efc2): cargo's resolved features before (its parent on
+  # main) and after, for every shipped build and parity's two game selections, on Linux, Windows and macOS. cargo tree
+  # only: nothing is compiled.
+  feature-trees:
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 20
+    steps:
+      - name: The two commits
+        run: |
+          set -euo pipefail
+          git init -q repo && cd repo
+          git remote add origin "https://github.com/$GITHUB_REPOSITORY"
+          git fetch -q --depth 2 origin 7a53efc2cf8661b3687052dc4fbd983a1a3f8fde
+          git worktree add -q ../after 7a53efc2cf8661b3687052dc4fbd983a1a3f8fde
+          git worktree add -q ../before 7a53efc2cf8661b3687052dc4fbd983a1a3f8fde~1
+          cd .. && git -C after diff --stat HEAD~1 HEAD
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable, 2026-11
+        with:
+          toolchain: stable
+      - name: Fetch every target's crates (no build)
+        run: cd after && cargo fetch --locked
+      - name: Resolved features, before and after
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/trees"
+          tree() { # tree NAME ARGS...: "package features" lines per target and side, paths and repeat marks removed
+            local name=$1
+            shift
+            for target in x86_64-unknown-linux-gnu x86_64-pc-windows-msvc aarch64-apple-darwin; do
+              for side in before after; do
+                (cd "$side" && cargo tree --offline --locked -e normal,build,features --target "$target" -f '{p} {f}' --prefix none "$@") \
+                  | sed -E 's# \(/[^)]*\)##; s# \(\*\)##' | LC_ALL=C sort -u > "$RUNNER_TEMP/trees/$name@$target@$side"
+              done
+            done
+            echo "$name: cargo tree -e normal,build,features $*" >> "$RUNNER_TEMP/trees/commands"
+          }
+          tree released-game -p horizon-official -p horizon-client-lib -p horizon-prepare -p horizon-server
+          tree horizon-game -p horizon-game
+          tree server-build -p horizon-game --no-default-features
+          tree sdk-build -p horizon-mod-host
+          tree sdk-build-system-allocator -p horizon-mod-host --features system-allocator
+          tree sdk-server-build -p horizon-mod-host --no-default-features --features system-allocator
+          tree fork-config -p horizon-game --no-default-features --features audio,controllers
+          tree parity-two-packages -p horizon-game -p horizon-client-lib
+          cat "$RUNNER_TEMP/trees/commands"
+          python3 - <<'EOF' | tee -a "$GITHUB_STEP_SUMMARY"
+          import os
+          from pathlib import Path
+          trees = Path(os.environ["RUNNER_TEMP"]) / "trees"
+          def load(path):
+              found = {}
+              for line in path.read_text().splitlines():
+                  parts = line.split(" ")
+                  if len(parts) > 1 and parts[1] == "feature":
+                      continue  # a feature node of -e features: its package's own line lists it
+                  package = " ".join(parts[:2])
+                  features = set(filter(None, parts[2].split(","))) if len(parts) > 2 else set()
+                  found[package] = found.get(package, set()) | features
+              return found
+          def without_flag(tree):
+              """The tree less the new flag: client-lib-default anywhere, and horizon-client-lib's own `default`."""
+              return {package: features - {"client-lib-default"} - ({"default"} if package.startswith("horizon-client-lib ") else set())
+                      for package, features in tree.items()}
+          sound = ("alsa ", "alsa-sys ", "libudev ", "libudev-sys ", "cpal ", "gilrs ")
+          print("| Build | Target | Packages | Packages whose features changed | Result | alsa/udev/cpal/gilrs after |")
+          print("| --- | --- | ---: | ---: | --- | ---: |")
+          names = sorted({p.name.split("@")[0] for p in trees.glob("*@*@*")})
+          for name in names:
+              for target in ("x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc", "aarch64-apple-darwin"):
+                  before, after = load(trees / f"{name}@{target}@before"), load(trees / f"{name}@{target}@after")
+                  changed = sorted(p for p in set(before) | set(after) if before.get(p) != after.get(p))
+                  same = without_flag(before) == without_flag(after)
+                  detail = "; ".join(f"{p}: +{sorted(after.get(p, set()) - before.get(p, set()))} -{sorted(before.get(p, set()) - after.get(p, set()))}" for p in changed)
+                  result = ("identical" if not changed else "identical but for the flag") if same else "OTHER DIFFERENCES"
+                  print(f"| {name} | {target} | {len(after)} | {len(changed)} | {result} | {sum(p.startswith(sound) for p in after)} |")
+                  if detail:
+                      print(f"|  |  |  |  | {detail} |  |")
+          print()
+          for target in ("x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc", "aarch64-apple-darwin"):
+              for side in ("before", "after"):
+                  one, two = load(trees / f"horizon-game@{target}@{side}"), load(trees / f"parity-two-packages@{target}@{side}")
+                  differ = sorted(p for p in set(one) | set(two) if one.get(p) != two.get(p))
+                  text = "one feature set" if not differ else "differ: " + "; ".join(
+                      f"{p} alone {sorted(one.get(p, set()))} with client-lib {sorted(two.get(p, set()))}" for p in differ)
+                  print(f"- parity's selections (-p horizon-game, and -p horizon-game -p horizon-client-lib), {side}, {target}: {text}")
+          EOF
