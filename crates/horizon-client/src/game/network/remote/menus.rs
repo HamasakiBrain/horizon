@@ -239,8 +239,11 @@ impl Game<'_> {
         true
     }
     pub(super) fn remote_reject_container_body(&mut self, container: i32) {
+        // Read before the close, which forgets the container screen under a
+        // mod's own screen: that mod's screen goes with the menu.
+        let container_screen = self.container_screen() == Screen::Inventory;
         self.remote_close_local();
-        if self.container_screen() == Screen::Inventory {
+        if container_screen {
             self.set_screen(Screen::Playing);
             self.capture(true);
         }
