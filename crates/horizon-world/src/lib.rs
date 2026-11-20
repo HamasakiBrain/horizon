@@ -1,5 +1,6 @@
 //! Vanilla-compatible world data for Horizon. This crate does not run gameplay.
 #![forbid(unsafe_code)]
+// Speed trial (ci/parity-speed-trial): a one-line change in a crate every probe links.
 
 pub mod active_effect_tick;
 pub mod active_effects;

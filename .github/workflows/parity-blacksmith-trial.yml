@@ -489,6 +489,20 @@ jobs:
       - name: The probe build's files after the builds
         if: ${{ !cancelled() }}
         run: find .local/parity-target target -type f -printf '%s %T@ %p\n' | LC_ALL=C sort > "$RUNNER_TEMP/target-after-builds"
+      # What a pull request's selection (--changed-files) would pick with the parity state restored here, which holds
+      # records of only the harnesses this trial ran: a harness with no record is always picked.
+      - name: What --changed-files would select
+        if: ${{ !cancelled() }}
+        env:
+          PARITY_HOSTS: ''
+        run: |
+          . "$RUNNER_TEMP/clock.sh"
+          for file in crates/horizon-world/src/lib.rs crates/horizon-gameplay/src/allays.rs; do
+            echo "$file" > "$RUNNER_TEMP/changed"
+            start=$(date +%s%N)
+            python3 tools/parity.py --changed-files "$RUNNER_TEMP/changed" --list > "$RUNNER_TEMP/selection" 2>&1 || true
+            record "selection for a change to $file ($(grep -E 'harnesses depend on them|would run' "$RUNNER_TEMP/selection" | tr '\n' ' '))" "$start"
+          done
       - name: 22 server-side harnesses
         if: ${{ !cancelled() }}
         env:
