@@ -69,14 +69,14 @@ def enter():
 def create(path):
     """Create the hash database once. Shims starting together on an empty cache each switched it to WAL, and those
     that lost failed ("database is locked": 63 of 960 on Linux, 2026-11-20), failing their harness's first run.
-    One creates it under a lock, whole, and renames it into place, so a shim checking without the lock never sees
-    it half made; the others wait for the lock, then find it."""
+    One creates it under a lock, whole, and renames it into place; the others wait for the lock, then find it.
+    A database switched to WAL but left without its table (an older shim stopped between the two) is completed."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path.with_name("hashes.lock"), "a+b") as handle:
         file_lock.lock(handle)
-        if in_wal_mode(path):
+        if in_wal_mode(path) and has_table(path):
             return
-        # A database from before WAL, or before this lock, is switched in place.
+        # A database from before WAL, or before this lock, is switched and completed in place.
         target = path if path.exists() else path.with_name(f"hashes.{os.getpid()}.sqlite")
         db = sqlite3.connect(target, timeout=60)
         db.execute("pragma journal_mode=wal")
@@ -96,13 +96,29 @@ def in_wal_mode(path):
         return False
 
 
+TABLE = "select 1 from sqlite_master where type = 'table' and name = 'hashes'"
+
+
+def has_table(path):
+    db = sqlite3.connect(path, timeout=60)
+    try:
+        return db.execute(TABLE).fetchone() is not None
+    finally:
+        db.close()
+
+
 class Hashes:
     """Content hashes keyed by path, size and mtime, shared by parallel harnesses."""
 
     def __init__(self):
         path = CACHE / "hashes.sqlite"
-        if not in_wal_mode(path):
-            create(path)
+        # A warm cache: the header and one schema query, no lock.
+        if in_wal_mode(path):
+            self.db = sqlite3.connect(path, timeout=60)
+            if self.db.execute(TABLE).fetchone():
+                return
+            self.db.close()
+        create(path)
         self.db = sqlite3.connect(path, timeout=60)
 
     def file(self, path):

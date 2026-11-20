@@ -584,21 +584,43 @@ class OracleCacheCreationTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as temp:
                 go = Path(temp) / "go"
                 env = dict(os.environ, PARITY_SHIM_CACHE=str(Path(temp) / "oracle-cache"))
-                shims = [subprocess.Popen([sys.executable, "-c", child, str(go)], env=env, stderr=subprocess.PIPE,
-                                          text=True) for _ in range(16)]
-                time.sleep(0.3)  # every one started and waiting, so they open the database together
-                go.touch()
-                failures += [error.strip().splitlines()[-1] for shim in shims
-                             if (error := shim.communicate(timeout=60)[1]) and shim.returncode]
+                shims = []
+                try:
+                    for _ in range(16):
+                        shims.append(subprocess.Popen([sys.executable, "-c", child, str(go)], env=env,
+                                                      stderr=subprocess.PIPE, text=True))
+                    time.sleep(0.3)  # every one started and waiting, so they open the database together
+                    go.touch()
+                    failures += [error.strip().splitlines()[-1] for shim in shims
+                                 if (error := shim.communicate(timeout=60)[1]) and shim.returncode]
+                finally:
+                    for shim in shims:
+                        if shim.poll() is None:
+                            shim.kill()
+                        shim.communicate()
         self.assertEqual(failures, [])
 
     def test_a_warm_cache_takes_no_lock(self):
+        import hashlib
         from tools import parity_shim
+        expected = hashlib.sha256(Path(parity_shim.__file__).read_bytes()).hexdigest()
         with tempfile.TemporaryDirectory() as temp, mock.patch.object(parity_shim, "CACHE", Path(temp) / "cache"):
             parity_shim.Hashes().db.close()
             with mock.patch.object(parity_shim.file_lock, "lock", side_effect=AssertionError("locked")):
                 hashes = parity_shim.Hashes()
-            self.assertEqual(hashes.file(parity_shim.__file__), hashes.file(parity_shim.__file__))
+            self.assertEqual([hashes.file(parity_shim.__file__) for _ in range(2)], [expected, expected])
+            hashes.db.close()
+
+    def test_a_wal_database_without_its_table_is_completed(self):
+        import sqlite3
+        from tools import parity_shim
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(parity_shim, "CACHE", Path(temp) / "cache"):
+            parity_shim.CACHE.mkdir()
+            db = sqlite3.connect(parity_shim.CACHE / "hashes.sqlite")
+            db.execute("pragma journal_mode=wal")  # an older shim stopped here, before its create table
+            db.close()
+            hashes = parity_shim.Hashes()
+            self.assertEqual(len(hashes.file(parity_shim.__file__)), 64)
             hashes.db.close()
 
 
