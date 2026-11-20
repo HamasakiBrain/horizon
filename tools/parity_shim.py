@@ -371,20 +371,21 @@ def decide(name, reason, seconds=None, key=None, **details):
 
 
 def mismatches(saved, key, status, captured, hashes):
-    """How what the oracle just did differs from what replaying its record would have given: sizes and hash
-    prefixes only, never the content (oracle output is game data)."""
+    """How what the oracle just did differs from what replaying its record would have given: which stream or output,
+    and sizes, never the content or a digest of it (oracle output is game data, and this goes to CI logs)."""
     if status != 0:
         return [f"exit status {status}, recorded 0"]
     found = []
     for stream in ("stdout", "stderr"):
         recorded, now = (CACHE / f"{key}.{stream}").read_bytes(), bytes(captured[stream])
         if recorded != now:
-            shas = [hashlib.sha256(data).hexdigest()[:12] for data in (now, recorded)]
-            found.append(f"{stream}: {len(now)} bytes, recorded {len(recorded)} (sha256 {shas[0]}, recorded {shas[1]})")
+            found.append(f"{stream}: {len(now)} bytes, recorded {len(recorded)}")
     for path, sha in saved.get("output_sha", {}).items():
-        now = hashes.file(path) if os.path.isfile(path) else "missing"
-        if now != sha:
-            found.append(f"output {os.path.relpath(path)}: sha256 {now[:12]}, recorded {sha[:12]}")
+        if not os.path.isfile(path):
+            found.append(f"output {os.path.relpath(path)}: missing")
+        elif hashes.file(path) != sha:
+            found.append(f"output {os.path.relpath(path)}: other content ({os.path.getsize(path)} bytes, recorded "
+                         f"{saved['outputs'][path][0]})")
     return found
 
 
