@@ -160,6 +160,26 @@ def staged_tool() -> Path:
     return prebuilt_target() / "tools" / "release" / ("horizon-stage.exe" if sys.platform == "win32" else "horizon-stage")
 
 
+def surface_tool() -> tuple[list[str], dict | None]:
+    """How `pack` runs horizon-stage, and with which environment (None: this one).
+
+    The binary staging built, as it is: Cargo from the checkout would build a second copy (up to 2.6 min per SDK leg),
+    since the staged copy's own .cargo/config.toml adds its rustflags to the checkout's. Without one, Cargo builds it
+    in staging's target folder. `pack` checks the package is this commit's; a tool left by another commit's staging in
+    the same target folder is not detected."""
+    tool = staged_tool()
+    if tool.is_file():
+        print(f"Surface export with the staged tool {tool}", flush=True)
+        return [str(tool.resolve())], None
+    print("No staged tool: Cargo builds horizon-stage for the surface export", flush=True)
+    return STAGE_TOOL, {**os.environ, "CARGO_TARGET_DIR": str(prebuilt_target() / "tools")}
+
+
+# Set (to anything) for `cargo rustc --timings` on the SDK build: dry runs only (prebuilt-game-build.yml). Cargo fails
+# the build when it can't write the report, so a release build never asks for one.
+TIMINGS = "HORIZON_SDK_TIMINGS"
+
+
 def stage(target_dir: Path, stage_tool: Path | None = None, prepare=None) -> Path:
     """A copy of HEAD's tracked source with the staging pass run over it (arismoko/horizon#589): every point method gets its
     `#[point]`, internals become public, and the build data is written with HEAD's commit in its header.
@@ -471,9 +491,9 @@ def build(out: Path, server: bool) -> None:
     # Encoded flags take precedence over RUSTFLAGS in Cargo.
     environment = {key: value for key, value in os.environ.items() if key != "CARGO_ENCODED_RUSTFLAGS"}
     messages = run(
-        # --timings: target/prebuilt/cargo-timings/, outside the package; the workflow uploads it on its own.
-        ["cargo", "rustc", "--locked", "-p", GAME, "--lib", "--crate-type", "dylib", "--timings",
-         "--target", host, "--profile", PROFILE, "--message-format", "json-render-diagnostics", *features, *link],
+        # --timings writes target/prebuilt/cargo-timings/, outside the package; the workflow uploads it on its own.
+        ["cargo", "rustc", "--locked", "-p", GAME, "--lib", "--crate-type", "dylib",
+         *(["--timings"] if os.environ.get(TIMINGS) else []), "--target", host, "--profile", PROFILE, "--message-format", "json-render-diagnostics", *features, *link],
         cwd=staged,
         env={**environment, "HORIZON_GAME_BUILD_ID": head(), "RUSTFLAGS": rustflags + " -D warnings", "CARGO_TARGET_DIR": str(target_dir)},
     )
@@ -884,18 +904,9 @@ def pack(out: Path, dist: Path, stage_tool: Path | None = None) -> None:
                     if (error := future.exception()) is not None]
     if failures:
         sys.exit("SDK archive compression failed: " + "; ".join(failures))
-    # The tool `build` staged with, run as it is: Cargo from here would build a second copy (up to 2.6 min per SDK
-    # leg), since the staged copy's own .cargo/config.toml adds its rustflags to this checkout's. `pack` checked the
-    # package is this commit's; a tool left by another commit's staging in the same target folder is not detected.
-    if stage_tool is None and staged_tool().is_file():
-        stage_tool = staged_tool()
-        print(f"Surface export with the staged tool {stage_tool}", flush=True)
-    elif stage_tool is None:
-        print("No staged tool: Cargo builds horizon-stage for the surface export", flush=True)
-    command = [str(stage_tool.resolve())] if stage_tool is not None else STAGE_TOOL
+    command, env = ([str(stage_tool.resolve())], None) if stage_tool is not None else surface_tool()
     started = time.monotonic()
-    run(command + ["surface", str(ROOT), str(dist / SURFACE)], cwd=ROOT,
-        env=None if stage_tool is not None else {**os.environ, "CARGO_TARGET_DIR": str(prebuilt_target() / "tools")})
+    run(command + ["surface", str(ROOT), str(dist / SURFACE)], cwd=ROOT, env=env)
     print(f"Surface export: {time.monotonic() - started:.3f}s", flush=True)
     for asset in sorted(dist.iterdir()):
         print(f"{asset.name}: {asset.stat().st_size} bytes")
