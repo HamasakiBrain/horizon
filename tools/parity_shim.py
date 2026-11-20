@@ -30,6 +30,11 @@ import subprocess
 import sys
 import threading
 
+try:
+    from . import file_lock
+except ImportError:
+    import file_lock  # run as a script (the java and javac links): its own folder is on sys.path
+
 CACHE = Path(os.environ.get("PARITY_SHIM_CACHE", ".local/parity-runner/oracle-cache"))
 PATH_OPTIONS = {"-cp", "-classpath", "--class-path", "-sourcepath", "--source-path", "-p", "--module-path"}
 
@@ -61,14 +66,44 @@ def enter():
     os.environ["PATH"] = os.environ.get("PARITY_SHIM_REAL_PATH", "")
 
 
+def create(path):
+    """Create the hash database once. Shims starting together on an empty cache each switched it to WAL, and those
+    that lost failed ("database is locked": 63 of 960 on Linux, 2026-11-20), failing their harness's first run.
+    One creates it under a lock, whole, and renames it into place, so a shim checking without the lock never sees
+    it half made; the others wait for the lock, then find it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path.with_name("hashes.lock"), "a+b") as handle:
+        file_lock.lock(handle)
+        if in_wal_mode(path):
+            return
+        # A database from before WAL, or before this lock, is switched in place.
+        target = path if path.exists() else path.with_name(f"hashes.{os.getpid()}.sqlite")
+        db = sqlite3.connect(target, timeout=60)
+        db.execute("pragma journal_mode=wal")
+        db.execute("create table if not exists hashes (path text primary key, size int, mtime int, sha text)")
+        db.commit()
+        db.close()  # the last connection: its -wal and -shm files go with it
+        if target != path:
+            target.replace(path)
+
+
+def in_wal_mode(path):
+    """The database exists and is in WAL mode: its header's read and write versions are 2."""
+    try:
+        with open(path, "rb") as stream:
+            return stream.read(20)[18:20] == b"\x02\x02"
+    except OSError:
+        return False
+
+
 class Hashes:
     """Content hashes keyed by path, size and mtime, shared by parallel harnesses."""
 
     def __init__(self):
-        CACHE.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(CACHE / "hashes.sqlite", timeout=60)
-        self.db.execute("pragma journal_mode=wal")
-        self.db.execute("create table if not exists hashes (path text primary key, size int, mtime int, sha text)")
+        path = CACHE / "hashes.sqlite"
+        if not in_wal_mode(path):
+            create(path)
+        self.db = sqlite3.connect(path, timeout=60)
 
     def file(self, path):
         stat = os.stat(path)

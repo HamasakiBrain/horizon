@@ -568,6 +568,39 @@ class OracleReuseTests(unittest.TestCase):
             self.assertEqual(Path(parity_shim.real("java")), self.bin / "java")
 
 
+class OracleCacheCreationTests(unittest.TestCase):
+    """Parallel harnesses start their oracles at once: on an empty cache every shim creates the hash database
+    together, and none may fail ("database is locked" when they all switched it to WAL, 2026-11-20)."""
+
+    def test_shims_starting_at_once_on_an_empty_cache_all_get_it(self):
+        tools = Path(parity.__file__).parent
+        child = ("import os, sys, time\n"
+                 f"sys.path.insert(0, {str(tools)!r})\n"
+                 "while not os.path.exists(sys.argv[1]): time.sleep(0.001)\n"
+                 "import parity_shim\n"
+                 f"parity_shim.Hashes().file({str(tools / 'parity_shim.py')!r})\n")
+        failures = []
+        for _ in range(6):
+            with tempfile.TemporaryDirectory() as temp:
+                go = Path(temp) / "go"
+                env = dict(os.environ, PARITY_SHIM_CACHE=str(Path(temp) / "oracle-cache"))
+                shims = [subprocess.Popen([sys.executable, "-c", child, str(go)], env=env, stderr=subprocess.PIPE,
+                                          text=True) for _ in range(16)]
+                time.sleep(0.3)  # every one started and waiting, so they open the database together
+                go.touch()
+                failures += [error.strip().splitlines()[-1] for shim in shims
+                             if (error := shim.communicate(timeout=60)[1]) and shim.returncode]
+        self.assertEqual(failures, [])
+
+    def test_a_warm_cache_takes_no_lock(self):
+        from tools import parity_shim
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(parity_shim, "CACHE", Path(temp) / "cache"):
+            parity_shim.Hashes().db.close()
+            with mock.patch.object(parity_shim.file_lock, "lock", side_effect=AssertionError("locked")):
+                hashes = parity_shim.Hashes()
+            self.assertEqual(hashes.file(parity_shim.__file__), hashes.file(parity_shim.__file__))
+            hashes.db.close()
+
 
 class LargeOutputTests(unittest.TestCase):
     def test_a_pass_clears_only_its_own_directory(self):
