@@ -2,8 +2,10 @@
 """Reuse a vanilla oracle's last results when nothing it reads has changed.
 
 tools/parity.py puts `java` and `javac` links to this script first on PATH.
-A run is identified by its command line, stdin when it is a file, and the
-real program. After a successful run, the files it created or changed under
+A run is identified by its command line, stdin when it is a file, the real
+program and its -version text, and the environment (see IGNORED: oracles take
+settings from it, such as VanillaChunkGenerationOracle's HORIZON_* variables).
+After a successful run, the files it created or changed under
 the paths its arguments name (classpath and sourcepath entries included) are
 recorded as its outputs, with their size and mtime and its stdout and stderr;
 every other file under those paths is recorded as an input with its content
@@ -18,6 +20,12 @@ stops reusing its oracle results.
 
 A run that reads stdin from a pipe, or fails, is never cached.
 PARITY_JAVA_CACHE=0 disables reuse (tools/parity.py --fresh).
+
+Each call appends one JSON line saying what the shim did and why to
+PARITY_SHIM_DECISIONS (tools/parity.py sums them up after a run). With
+PARITY_SHIM_VERIFY=1 a replay is checked instead: the oracle runs anyway, and
+if its stdout, stderr or outputs differ from the record's, the record is
+removed and the call fails.
 """
 
 import hashlib
@@ -38,6 +46,17 @@ except ImportError:
 
 CACHE = Path(os.environ.get("PARITY_SHIM_CACHE", ".local/parity-runner/oracle-cache"))
 PATH_OPTIONS = {"-cp", "-classpath", "--class-path", "-sourcepath", "--source-path", "-p", "--module-path"}
+# Variables left out of the key: they change between runs of the same call, and no oracle reads them (tools/parity.py's
+# bookkeeping, a CI job's ids and the commits and token its parity workflows pass (parity.yml, parity-main.yml,
+# parity-hosted.yml), an ssh or terminal session's state, the per-harness game folder). Every other variable, one
+# never seen before included, is part of the key.
+IGNORED_PREFIXES = ("PARITY_", "GITHUB_", "RUNNER_", "ACTIONS_", "BLACKSMITH_", "SSH_", "XDG_SESSION_")
+IGNORED = {"PWD", "OLDPWD", "SHLVL", "_", "TERM", "TERM_SESSION_ID", "COLUMNS", "LINES", "INVOCATION_ID",
+           "JOURNAL_STREAM", "SYSTEMD_EXEC_PID", "HORIZON_HOME", "BASE_SHA", "HEAD_SHA", "MAIN_SHA", "GH_TOKEN",
+           "HARNESSES", "SHARD"}
+# Variables naming a file or folder an oracle reads: what is in it is part of the key, as the name stays when it
+# changes. HORIZON_ORDER's file is written from Horizon's own ticket order (tools/test_decorated_region_parity.py).
+CONTENT_VARIABLES = {"HORIZON_ORDER", "HORIZON_DATAPACKS"}
 
 
 # How deep the shim may run inside itself before it stops: it never needs to, since the real program
@@ -255,46 +274,184 @@ def note_outputs(outputs):
             stream.writelines(f"{path}\n" for path in outputs)
 
 
-def reusable(saved, paths, hashes):
-    """The recorded inputs are unchanged, nothing was added beside them, and the outputs are as left."""
+def stale(saved, paths, hashes):
+    """Why the recorded run can't be replayed (a reason and its details), or None if it can: its inputs are
+    unchanged, nothing was added beside them, and its outputs are as it left them."""
     outputs = saved["outputs"]
-    if files_under(paths) - set(outputs) != set(saved["inputs"]):
-        return False
-    if any(snapshot([path]).get(path) != stamp for path, stamp in outputs.items()):
-        return False
-    return all(hashes.file(path) == sha for path, sha in saved["inputs"].items())
+    found = files_under(paths) - set(outputs)
+    if found != set(saved["inputs"]):
+        return "input-set", {"added": examples(found - set(saved["inputs"])),
+                             "removed": examples(set(saved["inputs"]) - found)}
+    moved = [path for path, stamp in outputs.items() if snapshot([path]).get(path) != stamp]
+    if moved:
+        return "output-stamp", {"outputs": examples(moved)}
+    changed = [path for path, sha in saved["inputs"].items() if hashes.file(path) != sha]
+    if changed:
+        return "input-content", {"inputs": examples(changed)}
+    return None
+
+
+def examples(paths, count=3):
+    """How many paths, and the first few: enough to see what keeps a call from being replayed."""
+    paths = sorted(paths)
+    return {"count": len(paths), "first": [os.path.relpath(path) for path in paths[:count]]}
+
+
+def digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+
+def content_digest(path, hashes):
+    path = os.path.abspath(path)
+    if os.path.isfile(path):
+        return hashes.file(path)
+    if os.path.isdir(path):
+        return digest([[os.path.relpath(file, path), hashes.file(file)] for file in sorted(tree(path))])
+    return "missing"
+
+
+def environment_digests(environment, hashes):
+    """{name: digest of its value} for every variable in the key. Only digests are kept, never values."""
+    kept = {}
+    for name, value in environment.items():
+        if name in IGNORED or name.startswith(IGNORED_PREFIXES):
+            continue
+        content = content_digest(value, hashes) if name in CONTENT_VARIABLES else ""
+        kept[name] = hashlib.sha256(os.fsencode(value) + b"\0" + content.encode()).hexdigest()[:16]
+    return kept
+
+
+def version_digest(program, environment):
+    """A digest of `program -version`'s output: another JDK under the same path, or a JDK updated in place, gives
+    other results. Kept per real path, size, mtime and JAVA_HOME (a launcher that picks its JDK from it)."""
+    path = os.path.realpath(program)
+    stat = os.stat(path)
+    cached = CACHE / "versions" / digest([path, stat.st_size, stat.st_mtime_ns, environment.get("JAVA_HOME")])
+    try:
+        return cached.read_text()
+    except FileNotFoundError:
+        pass
+    result = subprocess.run([program, "-version"], stdin=subprocess.DEVNULL, capture_output=True, timeout=120)
+    value = digest([result.returncode, result.stdout.hex(), result.stderr.hex()])
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    temporary = cached.with_suffix(f".{os.getpid()}.tmp")
+    temporary.write_text(value)
+    temporary.replace(cached)
+    return value
+
+
+def unrecorded(index, variables, version):
+    """Why no record matches this call's key: what changed since the call last ran with this command line."""
+    try:
+        last = json.loads(index.read_text())
+    except FileNotFoundError:
+        return "no-record", {}
+    if last["version"] != version:
+        return "java-version", {}
+    if last["environment"] != variables:
+        before, now = last["environment"], variables
+        return "environment", {"variables": sorted(name for name in before.keys() | now.keys()
+                                                   if before.get(name) != now.get(name))}
+    return "no-record", {}  # recorded once, then removed (a failed verification)
+
+
+def decide(name, reason, seconds=None, key=None, **details):
+    """Append what the shim did with this call to PARITY_SHIM_DECISIONS: one whole line in one write to a file opened
+    for appending, so parallel shims' lines never interleave."""
+    path = os.environ.get("PARITY_SHIM_DECISIONS")
+    if not path:
+        return
+    line = json.dumps({"harness": os.environ.get("PARITY_SHIM_HARNESS"), "program": name, "reason": reason,
+                       "seconds": None if seconds is None else round(seconds, 3), "key": key and key[:12], **details})
+    descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        os.write(descriptor, (line + "\n").encode())
+    finally:
+        os.close(descriptor)
+
+
+def mismatches(saved, key, status, captured, hashes):
+    """How what the oracle just did differs from what replaying its record would have given: sizes and hash
+    prefixes only, never the content (oracle output is game data)."""
+    if status != 0:
+        return [f"exit status {status}, recorded 0"]
+    found = []
+    for stream in ("stdout", "stderr"):
+        recorded, now = (CACHE / f"{key}.{stream}").read_bytes(), bytes(captured[stream])
+        if recorded != now:
+            shas = [hashlib.sha256(data).hexdigest()[:12] for data in (now, recorded)]
+            found.append(f"{stream}: {len(now)} bytes, recorded {len(recorded)} (sha256 {shas[0]}, recorded {shas[1]})")
+    for path, sha in saved.get("output_sha", {}).items():
+        now = hashes.file(path) if os.path.isfile(path) else "missing"
+        if now != sha:
+            found.append(f"output {os.path.relpath(path)}: sha256 {now[:12]}, recorded {sha[:12]}")
+    return found
 
 
 def main():
     name = os.path.basename(sys.argv[0])
     arguments = sys.argv[1:]
     program = real(name)
-    enter()
-    if os.environ.get("PARITY_JAVA_CACHE") == "0" or "-version" in arguments or "--version" in arguments:
+    environment = dict(os.environ)  # as the harness set it, before enter() points PATH at the real programs
+
+    def passthrough(reason):
+        decide(name, reason)
         os.execv(program, [program, *arguments])
+
+    enter()
+    if os.environ.get("PARITY_JAVA_CACHE") == "0":
+        passthrough("passthrough-off")
+    if "-version" in arguments or "--version" in arguments:
+        passthrough("passthrough-version")
     try:
         hashes = Hashes()
     except Uncached as reason:
         print(f"parity shim: the oracle cache in {CACHE} was not ready within {INIT_SECONDS} s ({reason}): "
               f"{name} runs without it", file=sys.stderr, flush=True)
-        os.execv(program, [program, *arguments])
+        passthrough("passthrough-uncached")
     stdin = stdin_identity(hashes)
     if stdin is None:
-        os.execv(program, [program, *arguments])
+        passthrough("passthrough-pipe")
     paths = named_paths(arguments)
     command = {"program": os.path.realpath(program), "arguments": arguments, "cwd": os.getcwd(), "stdin": stdin}
-    key = hashlib.sha256(json.dumps(command, sort_keys=True).encode()).hexdigest()
+    variables = environment_digests(environment, hashes)
+    version = version_digest(program, environment)
+    key = digest({"command": command, "environment": variables, "version": version})
     record = CACHE / f"{key}.json"
+    # The last key this command line ran under, to say why a call found no record.
+    index = CACHE / "calls" / f"{digest(command)}.json"
     saved = json.loads(record.read_text()) if record.exists() else None
-    if saved and reusable(saved, paths, hashes):
+    if saved is None:
+        reason, details = unrecorded(index, variables, version)
+    else:
+        reason, details = stale(saved, paths, hashes) or (None, {})
+    verify = saved is not None and reason is None and os.environ.get("PARITY_SHIM_VERIFY") == "1"
+    if saved is not None and reason is None and not verify:
         note_outputs(saved["outputs"])
         sys.stdout.buffer.write((CACHE / f"{key}.stdout").read_bytes())
         sys.stderr.buffer.write((CACHE / f"{key}.stderr").read_bytes())
+        decide(name, "hit", saved.get("seconds"), key)
         return 0
     before = snapshot(paths)
     inputs = {path: hashes.file(path) for path in files_under(paths)}
+    started = time.monotonic()
     status, captured = run_and_tee([program, *arguments])
+    seconds = time.monotonic() - started
+    if verify:
+        found = mismatches(saved, key, status, captured, hashes)
+        if found:
+            for path in (record, CACHE / f"{key}.stdout", CACHE / f"{key}.stderr"):
+                path.unlink(missing_ok=True)
+            decide(name, "verify-mismatch", seconds, key, differs=found)
+            print(f"parity shim: VERIFY FAILED in {os.environ.get('PARITY_SHIM_HARNESS') or 'a harness'}: "
+                  f"{name} {' '.join(arguments)[:500]} (key {key[:12]}) gave other results than replaying its record "
+                  f"would have: {'; '.join(found)}. The record is removed.", file=sys.stderr, flush=True)
+            return status or 1
+        reason = "verify-ok"
+        if "output_sha" not in saved:
+            details = {"note": "stdout and stderr only: the record predates output hashes"}
     if status != 0:
+        decide(name, "passthrough-failed", seconds, key, miss=reason)
         return status
     after = snapshot(paths)
     outputs = {path: stamp for path, stamp in after.items() if stamp is not None and before.get(path) != stamp}
@@ -303,9 +460,16 @@ def main():
     (CACHE / f"{key}.stdout").write_bytes(captured["stdout"])
     (CACHE / f"{key}.stderr").write_bytes(captured["stderr"])
     temporary = record.with_suffix(f".{os.getpid()}.tmp")
-    temporary.write_text(json.dumps({"command": command, "inputs": inputs, "outputs": outputs}))
+    temporary.write_text(json.dumps({"command": command, "environment": variables, "version": version,
+                                     "inputs": inputs, "outputs": outputs, "seconds": round(seconds, 3),
+                                     "output_sha": {path: hashes.file(path) for path in outputs}}))
     temporary.replace(record)
+    index.parent.mkdir(exist_ok=True)
+    temporary = index.with_suffix(f".{os.getpid()}.tmp")
+    temporary.write_text(json.dumps({"key": key, "environment": variables, "version": version}))
+    temporary.replace(index)
     note_outputs(outputs)
+    decide(name, reason, seconds, key, **details)
     return 0
 
 

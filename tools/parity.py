@@ -24,7 +24,9 @@ Vanilla oracles are reused too: tools/parity_shim.py stands in for java and
 javac and replays an oracle run whose inputs are unchanged, so a Rust-only
 change costs only the Rust side. A harness that fails while reusing oracle
 results is rerun fresh, and stops reusing them if it then passes. --all and
---fresh never reuse them.
+--fresh never reuse them. The summary says what the shim did with each Java
+call (replayed, or run and why), and PARITY_SHIM_VERIFY=1 runs every replay
+anyway and fails the run if replaying would have given other results.
 
 A harness listed in parity_hosts.json's "known_flaky" (each with its reason)
 that fails runs once more from scratch instead, and a pass then counts. Every
@@ -49,6 +51,7 @@ the second build would replace the program the first is running.
 """
 
 import argparse
+from collections import Counter
 import hashlib
 import json
 import os
@@ -84,6 +87,8 @@ PROFILE = {
     "CARGO_PROFILE_DEV_OPT_LEVEL": "3",
 }
 SHIM = STATE_DIR / "shim"
+# One line per Java call the shim handled in this run (tools/parity_shim.py's decide), summed up at its end.
+DECISIONS = STATE_DIR / "shim-decisions.jsonl"
 # Results shared by every worktree using the same vanilla data (.local/minecraft
 # links to a shared directory in parallel worktrees): passes keyed by content,
 # so a harness whose inputs match one that passed elsewhere doesn't run again.
@@ -864,6 +869,7 @@ class LocalExecutor:
         self.builds = {}  # Windows: {harness: executables(...)}, see clashes
         self.dead = False  # this machine never drops out, unlike a remote host
         self.available, self.measured = 0, 0.0
+        self.decisions = None  # where the shim notes its decisions: the coordinating runner's, not a worker's
         (STATE_DIR / "logs").mkdir(parents=True, exist_ok=True)
         (STATE_DIR / "traces").mkdir(parents=True, exist_ok=True)
 
@@ -914,6 +920,8 @@ class LocalExecutor:
         game_home.mkdir(parents=True)
         environment.setdefault("HORIZON_HOME", str(game_home))
         environment["PARITY_SHIM_OUTPUTS"] = str(outputs_listing(name, fresh=True))
+        if self.decisions:
+            environment.update(PARITY_SHIM_DECISIONS=str(self.decisions), PARITY_SHIM_HARNESS=name)
         environment.pop("PARITY_SHARD", None)
         if shard:
             environment["PARITY_SHARD"] = shard
@@ -1679,6 +1687,55 @@ def report_retries(results, flaky):
             summary.write("### Harnesses that failed once, then ran again\n" + "".join(f"- {line}\n" for line in lines))
 
 
+REPLAYED = {"hit"}
+CHECKED = {"verify-ok", "verify-mismatch"}
+
+
+def report_decisions(path):
+    """Sum up what tools/parity_shim.py did with this run's Java calls, here and in the CI job's summary: calls per
+    reason, Java seconds run and replayed, the harnesses that ran the most Java seconds they might have replayed, and
+    which variables changed when the environment kept a call from being replayed. Harnesses run on other machines,
+    and fresh retries (no shim), are not counted. The verify failures, which fail the run."""
+    try:
+        decisions = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except FileNotFoundError:
+        return []
+    if not decisions:
+        return []
+    reasons = Counter(decision["reason"] for decision in decisions)
+    replayed = sum(decision["seconds"] or 0 for decision in decisions if decision["reason"] in REPLAYED)
+    ran = sum(decision["seconds"] or 0 for decision in decisions if decision["reason"] not in REPLAYED)
+    untimed = sum(decision["seconds"] is None for decision in decisions)
+    missed = Counter()
+    for decision in decisions:
+        if decision["reason"] not in REPLAYED | CHECKED and decision["seconds"]:
+            missed[decision["harness"]] += decision["seconds"]
+    variables = Counter(name for decision in decisions if decision["reason"] == "environment"
+                        for name in decision.get("variables", []))
+    failed = [decision for decision in decisions if decision["reason"] == "verify-mismatch"]
+    counts = ", ".join(f"{reason} {count}" for reason, count in reasons.most_common())
+    lines = [f"Java calls: {len(decisions)} ({counts})",
+             f"Java ran {ran:.0f} s, replayed {replayed:.0f} s; {untimed} calls untimed (passed straight to Java, or "
+             f"replayed from a record without its time)"]
+    if missed:
+        lines.append("Most Java seconds not replayed: " +
+                     ", ".join(f"{harness} {seconds:.0f} s" for harness, seconds in missed.most_common(10)))
+    if variables:
+        lines.append("Variables that kept calls from being replayed: " +
+                     ", ".join(f"{name} {count}" for name, count in variables.most_common()))
+    lines += [f"VERIFY FAILED {decision['harness']}: {decision['program']} {decision['key']}: "
+              f"{'; '.join(decision['differs'])}" for decision in failed]
+    print("\nOracle reuse (tools/parity_shim.py):")
+    for line in lines:
+        print(f"  {line}", flush=True)
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+            summary.write("### Oracle reuse (tools/parity_shim.py)\n\n| Reason | Calls |\n|---|---:|\n" +
+                          "".join(f"| {reason} | {count} |\n" for reason, count in reasons.most_common()) + "\n" +
+                          "".join(f"- {line}\n" for line in lines[1:]))
+    return failed
+
+
 def finished_run(failed):
     """Record that this run completed, for tools/gate.py: a crashed runner never writes it."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -1846,6 +1903,8 @@ def main():
         local = LocalExecutor(jobs, int(memory_available() * 0.75), args.timeout,
                               REMOTE_LOCAL_PEAK if remotes and args.jobs is None else None)
         local.solo = solo_harnesses(config)
+        DECISIONS.write_text("")
+        local.decisions = DECISIONS
         if os.name == "nt":
             packages = target_packages()
             local.builds = {name: executables(built, packages) for name, built in built_by.items()}
@@ -1862,6 +1921,7 @@ def main():
     finished_run(failed)
     print(f"\n{len(results) - len(failed)} passed, {len(failed)} failed in {elapsed / 60:.1f} min.")
     report_retries(results, known_flaky(config))
+    unverified = report_decisions(DECISIONS)
     known = known_failing(config)
     blocking, again, passed = split_known_failing(results, known)
     report_known_failing(again, passed, known)
@@ -1877,7 +1937,8 @@ def main():
                 lines = []
             for line in lines:
                 print(f"    {line[:300]}")
-    return 1 if blocking else 0
+    # A failed verification fails the run even though the harness then passed on its fresh retry.
+    return 1 if blocking or unverified else 0
 
 
 if __name__ == "__main__":
