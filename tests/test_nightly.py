@@ -1,3 +1,4 @@
+import copy
 import datetime as dt
 import json
 import unittest
@@ -195,6 +196,22 @@ class FirstNightlyTests(unittest.TestCase):
                 self.assertEqual("+refs/tags/nightly:refs/tags/nightly" in fetched, existing)
 
 
+def polytone_gate_bypasses(game, nightly_build):
+    """Where the Polytone tests could fail without holding the Nightly (game-build.yml's `polytone-windows`, called
+    through nightly-build.yml's `build`)."""
+    problems = []
+    job = game["jobs"]["polytone-windows"]
+    for where, part in [("job", job), *((f"step {i}", step) for i, step in enumerate(job["steps"]))]:
+        problems += [f"polytone-windows {where}: {key}" for key in ("if", "continue-on-error") if key in part]
+    for name in ("sign", "publish", "sdk-publish"):
+        gate = nightly_build["jobs"][name]
+        if "build" not in gate["needs"]:
+            problems.append(f"{name} doesn't need build")
+        condition = "".join(str(gate.get("if", "")).split())
+        problems += [f"{name} runs on {status}" for status in ("always()", "cancelled()", "failure()") if status in condition]
+    return problems
+
+
 class UntrustedBuildTests(unittest.TestCase):
     """A nightly can hold pull requests nobody reviewed: nothing its build leaves may reach a release (game-build.yml)."""
 
@@ -232,18 +249,27 @@ class UntrustedBuildTests(unittest.TestCase):
     def test_the_polytone_tests_hold_the_nightly_as_the_windows_build_does(self):
         # Their own job beside the Windows build: whatever it was given, a failure must still fail the called
         # workflow, which sign, publish and sdk-publish need.
-        jobs = yaml.safe_load(self.game)["jobs"]
-        job = jobs["polytone-windows"]
-        self.assertNotIn("if", job)
-        self.assertNotIn("continue-on-error", job)
+        game = yaml.safe_load(self.game)
+        nightly_build = yaml.safe_load((WORKFLOWS / "nightly-build.yml").read_text())
+        job = game["jobs"]["polytone-windows"]
         self.assertEqual(job["runs-on"], "windows-latest")
         self.assertEqual(job["env"]["RUSTFLAGS"], "-C target-feature=+crt-static")
         self.assertEqual(job["steps"][-1]["run"].strip(),
                          "cargo test --release --locked -p horizon-client-render --lib particles::polytone::tests::")
-        build = yaml.safe_load((WORKFLOWS / "nightly-build.yml").read_text())["jobs"]
-        for name in ("sign", "publish", "sdk-publish"):
-            self.assertIn("build", build[name]["needs"], name)
-            self.assertNotIn("always()", str(build[name].get("if", "")), name)
+        self.assertEqual(polytone_gate_bypasses(game, nightly_build), [])
+        # Each way around the gate is caught: a step or job allowed to fail, a skipped test, a publishing job that
+        # runs after a failed build.
+        for bypass in ({"step": {"continue-on-error": True}}, {"step": {"if": "github.event_name == 'schedule'"}},
+                       {"job": {"continue-on-error": True}}, {"job": {"if": "${{ inputs.trusted }}"}},
+                       {"sign": {"if": "${{ !cancelled() }}"}}, {"publish": {"if": "always() && true"}},
+                       {"sdk-publish": {"if": "failure() || needs.sdk.outputs.needed == 'true'"}},
+                       {"sign": {"needs": ["pick", "sdk-index"]}}):
+            with self.subTest(bypass=bypass):
+                mutated_game, mutated_build = copy.deepcopy(game), copy.deepcopy(nightly_build)
+                [(where, change)] = bypass.items()
+                polytone = mutated_game["jobs"]["polytone-windows"]
+                {"step": polytone["steps"][-1], "job": polytone}.get(where, mutated_build["jobs"].get(where)).update(change)
+                self.assertNotEqual(polytone_gate_bypasses(mutated_game, mutated_build), [])
 
     def test_a_trusted_build_never_reads_the_shared_sccache(self):
         calls = self.game.count("bash tools/ci/runner-env.sh")
