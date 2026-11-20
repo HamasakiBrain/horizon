@@ -23,6 +23,8 @@ env:
   # The probe build folder is cached in the clear only once the differential check found no game content in it.
   # Run 44636587982 found none (the control build differs in the same 108 files).
   SAVE_CLEAR_TARGET: "true"
+  # Run 44650213806 saved the incremental build (9.6 GB in the cache): later runs only read it, within the 25 GB.
+  SAVE_TARGET: "false"
 
 jobs:
   # Does a probe build hold anything made from the vanilla data? The same probes, built at the same path twice from
@@ -550,7 +552,7 @@ jobs:
       # Does the shim replay these oracles at all, with no cache in between? Each harness twice in one parity.py run
       # (--repeat 2: the second round may reuse the first's oracle results): Java runs counted per harness.
       - name: Oracle reuse control (food, attribute, light, twice)
-        if: ${{ !cancelled() }}
+        if: false # measured in run 44650213806
         env:
           PARITY_HOSTS: ''
         run: |
@@ -617,7 +619,7 @@ jobs:
             seal oracle "${folders[@]}" "$PARITY_SHARED"
             echo "oracle seal: $(du -sk "${folders[@]}" "$PARITY_SHARED" 2>/dev/null | sort -rn | head -12 | sed "s#$PWD/##; s#$RUNNER_TEMP/##" | tr '\t' ' ' | paste -sd ';')"
           fi
-          if [ "$SAVE_CLEAR_TARGET" != true ] && [ "$SEALED_TARGET_HIT" != true ]; then
+          if [ "$SAVE_TARGET" != false ] && [ "$SAVE_CLEAR_TARGET" != true ] && [ "$SEALED_TARGET_HIT" != true ]; then
             seal target "$PWD/.local/parity-target" "$PWD/target"
           fi
       - name: Mark
@@ -654,13 +656,13 @@ jobs:
           record "save: oracle results and state" "$MARK"
           mark
       - name: Save the probe build (sealed)
-        if: ${{ !cancelled() && env.SAVE_CLEAR_TARGET != 'true' && steps.target-sealed.outputs.cache-hit != 'true' }}
+        if: ${{ !cancelled() && env.SAVE_TARGET != 'false' && env.SAVE_CLEAR_TARGET != 'true' && steps.target-sealed.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.SEALED }}/target
           key: ${{ steps.keys.outputs.target_prefix }}sealed-${{ github.sha }}
       - name: Save the probe build (clear)
-        if: ${{ !cancelled() && env.SAVE_CLEAR_TARGET == 'true' && steps.target-clear.outputs.cache-hit != 'true' }}
+        if: ${{ !cancelled() && env.SAVE_TARGET != 'false' && env.SAVE_CLEAR_TARGET == 'true' && steps.target-clear.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
