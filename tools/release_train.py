@@ -9,7 +9,7 @@
 The game ships only the Nightly since 2026-10-28 (Ludovic): when `decide --kind game` says so, release.yml starts
 `nightly build` on the commit it decided (tools/ci/nightly.py), and "the last release" is the published Nightly.
 A kind releases when a pull request merged into main since its last published release changed one of its
-player-facing paths (GAME_PATHS, LAUNCHER_PATHS), once BATCH of them are waiting and the newest merged at least
+player-facing paths (GAME_PATHS, LAUNCHER_RELEASE_PATHS), once BATCH of them are waiting and the newest merged at least
 DEBOUNCE ago (a burst of merges becomes one release), or once the oldest has waited MAX_WAIT (LAUNCHER_MAX_WAIT for the launcher: a lone fix still ships),
 or at once when one of those pull requests is labelled release-now. Pull requests labelled skip-release (work players don't see) don't count
 towards a release and aren't listed in the notes. RELEASES_PAUSED=1 (a repository variable) stops automatic releases,
@@ -70,6 +70,8 @@ OLD_LAUNCHER_PREFIX = "launcher-v"
 GAME_PATHS = ["crates/", "xtask/", "packaging/", "Cargo.toml", "Cargo.lock", "research-lock.json"]
 # Every crate the launcher builds in: the path packages its manifest reaches, through dependencies of any kind of the
 # launcher and normal and build dependencies of each crate after it (tests/test_release_train.py fails when they differ).
+# It decides only whether the launcher's checks and build run (tools/ci/rust_changes.py, tools/pr_ready.py, launcher.yml);
+# LAUNCHER_RELEASE_PATHS below decides releases.
 LAUNCHER_PATHS = [
     "launcher/",
     "crates/horizon-addresses/",
@@ -108,6 +110,27 @@ LAUNCHER_PATHS = [
     "crates/horizon-theme/",
     "crates/horizon-threads/",
     "crates/horizon-world/",
+    # Its icon, its menu entries and its AppImage are compiled or packaged into a release
+    # (launcher/build.rs, src/desktop.rs, packaging/linux/appimage.sh).
+    "packaging/icons/",
+    "packaging/linux/",
+]
+# What counts toward a launcher release (player_facing). Deliberately narrower than LAUNCHER_PATHS: the checks must see
+# every crate the launcher compiles, but a release for each change to the other 26 (horizon-world, horizon-core...)
+# would mean about 60% more launcher releases, more auto-updates for players and more release jobs on the Mac that
+# parity and Nightlies need; at about 47 releases a week such changes ship within hours anyway. Don't widen it to match.
+LAUNCHER_RELEASE_PATHS = [
+    "launcher/",
+    "crates/horizon-bench/",
+    "crates/horizon-friends/",
+    "crates/horizon-mcp/",
+    "crates/horizon-mod-api-gen/",
+    "crates/horizon-mod-package/",
+    "crates/horizon-port-pack/",
+    "crates/horizon-prepare/",
+    "crates/horizon-release-sign/",
+    "crates/horizon-system/",
+    "crates/horizon-theme/",
     # Its icon, its menu entries and its AppImage are compiled or packaged into a release
     # (launcher/build.rs, src/desktop.rs, packaging/linux/appimage.sh).
     "packaging/icons/",
@@ -161,7 +184,7 @@ def player_facing(path, kind, exporter_paths=frozenset()):
     if path.endswith(".md") or re.match(r"(crates|launcher)/([\w-]+/)?(examples|tests|benches)/", path):
         return False
     if kind == "launcher":
-        return any(path.startswith(p) for p in LAUNCHER_PATHS) and not any(path.startswith(p) for p in LAUNCHER_IGNORED)
+        return any(path.startswith(p) for p in LAUNCHER_RELEASE_PATHS) and not any(path.startswith(p) for p in LAUNCHER_IGNORED)
     return any(path == p or path.startswith(p) for p in GAME_PATHS) or path in exporter_paths
 
 

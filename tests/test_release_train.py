@@ -143,6 +143,28 @@ class ReleaseTrainTests(unittest.TestCase):
         self.assertEqual(listed, launcher_path_crates(),
                          "LAUNCHER_PATHS in tools/release_train.py must list launcher/Cargo.toml's path crates")
 
+    def test_the_launcher_release_paths_are_a_deliberate_choice(self):
+        # Changing what counts toward a launcher release is a decision, not a sync with LAUNCHER_PATHS (see its comment).
+        self.assertEqual(train.LAUNCHER_RELEASE_PATHS, [
+            "launcher/",
+            "crates/horizon-bench/",
+            "crates/horizon-friends/",
+            "crates/horizon-mcp/",
+            "crates/horizon-mod-api-gen/",
+            "crates/horizon-mod-package/",
+            "crates/horizon-port-pack/",
+            "crates/horizon-prepare/",
+            "crates/horizon-release-sign/",
+            "crates/horizon-system/",
+            "crates/horizon-theme/",
+            "packaging/icons/",
+            "packaging/linux/",
+        ])
+        self.assertFalse(train.player_facing("crates/horizon-world/src/lib.rs", "launcher"))
+
+    def test_every_launcher_release_path_runs_the_launcher_checks(self):
+        self.assertLessEqual(set(train.LAUNCHER_RELEASE_PATHS), set(train.LAUNCHER_PATHS))
+
     def test_the_launcher_workflow_runs_for_every_launcher_path(self):
         workflow = yaml.safe_load((train.ROOT / ".github/workflows/launcher.yml").read_text(encoding="utf-8"))
         triggers = workflow.get("on", workflow.get(True))
