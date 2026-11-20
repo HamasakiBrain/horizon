@@ -16,6 +16,9 @@ env:
   CARGO_BUILD_JOBS: "16"
   # Plain "Compiling" lines to count.
   CARGO_TERM_COLOR: never
+  # dtolnay/rust-toolchain writes CARGO_INCREMENTAL=0 when it is unset, which turns off the profiles' incremental
+  # builds (runs before 44646873854 had it off); set here, the action leaves it.
+  CARGO_INCREMENTAL: "1"
   DATASET: 26.3-linux-x64
   # The probe build folder is cached in the clear only once the differential check found no game content in it.
   # Run 44636587982 found none (the control build differs in the same 108 files).
@@ -313,7 +316,7 @@ jobs:
           prepare=$(git ls-files -s crates/horizon-prepare mods/horizon/src/test/java research-lock.json tools/ci/vanilla-data.sh tools/ci/seed_prepared_extras.py tools/prepare_output.py | sha256sum | cut -c1-16)
           echo "prepare_key=$prepare" >> "$GITHUB_OUTPUT"
           {
-            echo "target_prefix=parity-speed-trial-target-$rust-$lock-"
+            echo "target_prefix=parity-speed-trial-target-incremental-$rust-$lock-"
             echo "oracle_prefix=parity-speed-trial-oracle-$DATASET-$java-$rust-$folders-"
             echo "prepared=parity-speed-trial-prepared-$DATASET-$prepare"
             echo "dataset=parity-speed-trial-dataset-$DATASET-v1"
@@ -544,6 +547,20 @@ jobs:
           record "3 game-starting harnesses" "$start"
           exit "$status"
       # What the harnesses added to or changed in the build folders, which a cache saved now would hold. Names only.
+      # Does the shim replay these oracles at all, with no cache in between? Each harness twice in one parity.py run
+      # (--repeat 2: the second round may reuse the first's oracle results): Java runs counted per harness.
+      - name: Oracle reuse control (food, attribute, light, twice)
+        if: ${{ !cancelled() }}
+        env:
+          PARITY_HOSTS: ''
+        run: |
+          . "$RUNNER_TEMP/clock.sh"
+          before=$(wc -l < "$RUNNER_TEMP/tool-times")
+          start=$(date +%s%N)
+          python3 tools/parity.py --timeout 900 --repeat 2 food attribute light > "$RUNNER_TEMP/repeat.out" 2>&1 || true
+          tail -n +"$((before + 1))" "$RUNNER_TEMP/tool-times" | awk '$1 == "java" { n[$2]++ } END { for (h in n) printf "%s %d, ", h, n[h] }' > "$RUNNER_TEMP/repeat-java"
+          record "oracle control, 2 rounds (java runs: $(cat "$RUNNER_TEMP/repeat-java"); first round alone ran 3, 4 and 1 in run 2)" "$start"
+          grep -E "passed|RETRIED|retry" "$RUNNER_TEMP/repeat.out" || true
       - name: What the harnesses wrote into the probe build
         if: ${{ !cancelled() }}
         run: |
