@@ -71,6 +71,8 @@ def enter():
 # takes milliseconds (a few writes and fsyncs); the rest is waiting for the shims ahead of it, each holding the lock
 # for as long. Well past that, a holder is stuck (suspended, or on a disk that stalls): waiting longer gains nothing.
 INIT_SECONDS = 15
+# Setup's own waits on SQLite are short, so the deadline is checked between them: it runs over by about this at most.
+SETUP_BUSY_SECONDS = 0.1
 TABLE = "select 1 from sqlite_master where type = 'table' and name = 'hashes'"
 
 
@@ -82,7 +84,7 @@ def in_wal_mode(path):
     """The database exists and is in WAL mode: its header's read and write versions are 2."""
     try:
         with open(path, "rb") as stream:
-            return stream.read(20)[18:20] == b""
+            return stream.read(20)[18:20] == b"\x02\x02"
     except OSError:
         return False
 
@@ -103,12 +105,17 @@ def prepare(path, deadline):
             if time.monotonic() >= deadline:
                 raise Uncached("another process held hashes.lock throughout")
             time.sleep(0.02)
-        while True:
+        def in_time():
+            if time.monotonic() >= deadline:
+                raise Uncached("the database stayed locked")
+            return True
+
+        while in_time():
             try:
-                db = sqlite3.connect(path, timeout=max(0.0, deadline - time.monotonic()))
+                db = sqlite3.connect(path, timeout=SETUP_BUSY_SECONDS)
                 try:
                     # Answers the mode it is in: still another while a connection keeps it from switching.
-                    if db.execute("pragma journal_mode=wal").fetchone()[0] == "wal":
+                    if db.execute("pragma journal_mode=wal").fetchone()[0] == "wal" and in_time():
                         db.execute("create table if not exists hashes (path text primary key, size int, mtime int, "
                                    "sha text)")
                         db.commit()
@@ -118,8 +125,6 @@ def prepare(path, deadline):
             except sqlite3.OperationalError as error:
                 if not busy(error):
                     raise
-            if time.monotonic() >= deadline:
-                raise Uncached("the database stayed locked")
             time.sleep(0.02)
 
 
@@ -128,6 +133,9 @@ class Hashes:
 
     def __init__(self):
         path = CACHE / "hashes.sqlite"
+        # The clock starts before the warm probe, which keeps the usual busy timeout (no less patient than before
+        # the lock): time it spent waiting counts against the setup that may follow.
+        deadline = time.monotonic() + INIT_SECONDS
         # A warm cache: the header and one schema query, no lock.
         if in_wal_mode(path):
             self.db = sqlite3.connect(path, timeout=60)
@@ -138,7 +146,7 @@ class Hashes:
                 if not busy(error):
                     raise
             self.db.close()
-        prepare(path, time.monotonic() + INIT_SECONDS)
+        prepare(path, deadline)
         self.db = sqlite3.connect(path, timeout=60)
 
     def file(self, path):

@@ -660,16 +660,47 @@ class OracleCacheCreationTests(unittest.TestCase):
             parity_shim.CACHE.mkdir()
             old = sqlite3.connect(parity_shim.CACHE / "hashes.sqlite", check_same_thread=False, isolation_level=None)
             old.execute("begin exclusive")  # mid-way through its own creation: nobody else may read or switch it
-            release = threading.Timer(0.5, lambda: old.execute("commit"))
-            release.start()
-            started = time.monotonic()
+            connect, attempts, released = sqlite3.connect, [], threading.Event()
+
+            def release():
+                old.execute("commit")
+                released.set()
+
+            def counted(*args, **kwargs):
+                # The lock is released only after the shim's first attempt has met it.
+                attempts.append(time.monotonic())
+                if len(attempts) == 1:
+                    threading.Timer(0.5, release).start()
+                return connect(*args, **kwargs)
+
             try:
-                hashes = parity_shim.Hashes()
-                self.assertGreaterEqual(time.monotonic() - started, 0.4)
+                with mock.patch.object(sqlite3, "connect", side_effect=counted):
+                    hashes = parity_shim.Hashes()
+                # It waited for the release, through more than one attempt, instead of failing or giving up.
+                self.assertTrue(released.is_set())
+                self.assertGreater(len(attempts), 1)
                 self.assertTrue(parity_shim.in_wal_mode(parity_shim.CACHE / "hashes.sqlite"))
                 hashes.db.close()
             finally:
-                release.join()
+                released.wait(5)
+                old.close()
+
+    def test_a_database_locked_throughout_gives_up_soon_after_the_deadline(self):
+        import sqlite3
+        from tools import parity_shim
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(parity_shim, "CACHE", Path(temp) / "cache"), \
+                mock.patch.object(parity_shim, "INIT_SECONDS", 0.5):
+            parity_shim.CACHE.mkdir()
+            old = sqlite3.connect(parity_shim.CACHE / "hashes.sqlite", isolation_level=None)
+            old.execute("begin exclusive")
+            try:
+                started = time.monotonic()
+                with self.assertRaises(parity_shim.Uncached):
+                    parity_shim.Hashes()
+                # Each wait on SQLite is SETUP_BUSY_SECONDS at most, checked against the deadline between them.
+                self.assertLess(time.monotonic() - started, 0.5 + 1.0)
+            finally:
+                old.execute("rollback")
                 old.close()
 
     def test_a_lock_held_past_the_deadline_runs_the_oracle_uncached(self):
