@@ -144,6 +144,10 @@ impl Game<'_> {
         if let Some(owner) = owner {
             self.native_mod_screen = Some(owner.to_owned());
         }
+        if screen != Screen::Mod {
+            // The container a mod's screen was over is no longer behind it.
+            self.mod_screen_under = None;
+        }
         if screen == Screen::Mod {
             self.keys.clear();
             self.left = false;
@@ -2176,17 +2180,34 @@ impl Game<'_> {
         let charts = self.debug_charts.corners(!self.has_singleplayer_server());
         !debug_takes(corner, self.debug, charts)
     }
-    /// A mod's own screen closes (Escape, or `mod_screen_close`).
+    /// A mod's own screen closes (Escape, or `mod_screen_close`): back to the
+    /// container screen it opened over, as it was (its menu never closed), or
+    /// to the game.
     pub(super) fn close_mod_screen(&mut self) {
         if self.screen == Screen::Mod {
-            self.set_screen(Screen::Playing);
+            let back = self.mod_screen_under().unwrap_or(Screen::Playing);
+            self.set_screen(back);
             if self.screen == Screen::Mod {
                 // `screen_opening` kept it open.
                 return;
             }
-            self.capture(true);
+            if self.screen == Screen::Playing {
+                self.capture(true);
+            }
         }
         self.native_mod_screen = None;
+    }
+    /// The container screen the open mod screen is over (`Inventory` or
+    /// `Creative`), its menu still open; None with no mod screen open, or one
+    /// over the world.
+    pub(super) fn mod_screen_under(&self) -> Option<Screen> {
+        self.mod_screen_under.filter(|_| self.screen == Screen::Mod)
+    }
+    /// The container screen the player has open: the open screen, or the one
+    /// a mod's own screen is over. What a menu's close by the server (or a
+    /// portal) closes.
+    pub(super) fn container_screen(&self) -> Screen {
+        self.mod_screen_under().unwrap_or(self.screen)
     }
     /// A data file of the game's resources, content mods' included
     /// (`data/mymod/machines.json`), when there is one: what a mod's content
@@ -3530,8 +3551,9 @@ fn box_meets(b: &horizon_core::geometry::Aabb, min: [f64; 3], max: [f64; 3]) -> 
 
 /// What `mod_screen_open(mod_id)` does over `screen` (`blocked`: an
 /// overlay, the title screen, no window or no player; `owner`'s own screen
-/// open): `None` opens it, `Some` answers without changing anything (true:
-/// `mod_id`'s is already open).
+/// open): `None` opens it (over the world, or over a container screen it
+/// returns to), `Some` answers without changing anything (true: `mod_id`'s
+/// is already open).
 fn mod_screen_opens(
     screen: Screen,
     blocked: bool,
@@ -3541,7 +3563,11 @@ fn mod_screen_opens(
     if screen == Screen::Mod {
         return Some(owner == Some(mod_id));
     }
-    if screen != Screen::Playing || blocked {
+    let over = matches!(
+        screen,
+        Screen::Playing | Screen::Inventory | Screen::Creative
+    );
+    if !over || blocked {
         return Some(false);
     }
     None
@@ -4410,23 +4436,17 @@ mod tests {
         assert_eq!(game.screen_hovered_item(), None);
     }
 
-    /// A mod's own screen opens only over the world, never over another
-    /// screen, an overlay (the title screen, a book, loading, no window) or
-    /// another mod's; opening it again is a no-op.
+    /// A mod's own screen opens over the world or a container screen, never
+    /// over another screen, an overlay (the title screen, a book, loading, no
+    /// window) or another mod's; opening it again is a no-op.
     #[test]
-    fn a_mod_screen_opens_only_over_the_world() {
+    fn a_mod_screen_opens_only_over_the_world_or_a_container() {
         use super::{Screen, mod_screen_opens};
-        assert_eq!(mod_screen_opens(Screen::Playing, false, None, "a"), None);
-        assert_eq!(
-            mod_screen_opens(Screen::Playing, true, None, "a"),
-            Some(false)
-        );
-        for other in [
-            Screen::Paused,
-            Screen::Inventory,
-            Screen::Chat,
-            Screen::Options,
-        ] {
+        for over in [Screen::Playing, Screen::Inventory, Screen::Creative] {
+            assert_eq!(mod_screen_opens(over, false, None, "a"), None);
+            assert_eq!(mod_screen_opens(over, true, None, "a"), Some(false));
+        }
+        for other in [Screen::Paused, Screen::Chat, Screen::Options, Screen::Dead] {
             assert_eq!(mod_screen_opens(other, false, None, "a"), Some(false));
         }
         assert_eq!(

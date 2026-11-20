@@ -4786,7 +4786,10 @@ impl Game<'_> {
                     self.book = None;
                     self.sign_edit = None;
                 }
-                if !self.remote_lectern_closed() && (self.screen == Screen::Inventory || dialog) {
+                // A mod's own screen over the container screen goes with it
+                // (`setScreen(null)` closes whatever screen is open).
+                let container = self.container_screen() == Screen::Inventory;
+                if !self.remote_lectern_closed() && (container || dialog) {
                     self.remote_close_local();
                     self.set_screen(Screen::Playing);
                     self.capture(true);
@@ -9342,7 +9345,7 @@ impl Game<'_> {
     }
     fn remote_reject_container(&mut self, container: i32) {
         self.remote_close_local();
-        if self.screen == Screen::Inventory {
+        if self.container_screen() == Screen::Inventory {
             self.set_screen(Screen::Playing);
             self.capture(true);
         }
