@@ -6,6 +6,7 @@ from pathlib import Path
 
 from tools.ci import nightly
 from tools.ci import nightly_set as ns
+from tests.test_ci_concurrency import yaml
 
 NOW = "2026-10-28T12:00:00+00:00"
 PATTERNS = ns.guarded_patterns((Path(__file__).resolve().parents[1] / ".github/CODEOWNERS").read_text())
@@ -217,16 +218,32 @@ class UntrustedBuildTests(unittest.TestCase):
 
     def test_an_untrusted_build_never_runs_on_the_release_runner(self):
         runs_on = [line for line in self.game.splitlines() if "runs-on:" in line]
-        self.assertEqual(len(runs_on), 3)
-        # The host-independent wasm member is built on a credential-free hosted Linux runner.
-        hosted = [line for line in runs_on if line.strip() == "runs-on: ubuntu-22.04"]
-        self.assertEqual(len(hosted), 1)
+        self.assertEqual(len(runs_on), 4)
+        # The host-independent wasm member and the Polytone tests run on credential-free hosted runners.
+        hosted = [line for line in runs_on if line.strip() in ("runs-on: ubuntu-22.04", "runs-on: windows-latest")]
+        self.assertEqual(len(hosted), 2)
         # The nightly's own runner: never the release runner, and never behind pull requests' parity queue.
         nightly_runner = "fromJSON('[\"self-hosted\", \"macOS\", \"horizon-nightly\"]')"
         for line in runs_on:
             if line in hosted:
                 continue
             self.assertIn(f"inputs.trusted && vars.MAC_RUNNER || {nightly_runner}", line)
+
+    def test_the_polytone_tests_hold_the_nightly_as_the_windows_build_does(self):
+        # Their own job beside the Windows build: whatever it was given, a failure must still fail the called
+        # workflow, which sign, publish and sdk-publish need.
+        jobs = yaml.safe_load(self.game)["jobs"]
+        job = jobs["polytone-windows"]
+        self.assertNotIn("if", job)
+        self.assertNotIn("continue-on-error", job)
+        self.assertEqual(job["runs-on"], "windows-latest")
+        self.assertEqual(job["env"]["RUSTFLAGS"], "-C target-feature=+crt-static")
+        self.assertEqual(job["steps"][-1]["run"].strip(),
+                         "cargo test --release --locked -p horizon-client-render --lib particles::polytone::tests::")
+        build = yaml.safe_load((WORKFLOWS / "nightly-build.yml").read_text())["jobs"]
+        for name in ("sign", "publish", "sdk-publish"):
+            self.assertIn("build", build[name]["needs"], name)
+            self.assertNotIn("always()", str(build[name].get("if", "")), name)
 
     def test_a_trusted_build_never_reads_the_shared_sccache(self):
         calls = self.game.count("bash tools/ci/runner-env.sh")
