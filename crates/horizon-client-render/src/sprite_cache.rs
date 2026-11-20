@@ -8,13 +8,17 @@ use std::{collections::HashMap, fs, path::PathBuf};
 
 const MAGIC: &[u8; 4] = b"HSPR";
 /// Bump when `Decoded` or the decoding in `Sprites::decode` changes.
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 const FILE: &str = "horizon-sprites.cache";
 
 /// What decoding one texture gives, before it takes a layer.
 #[derive(Clone)]
 pub(crate) struct Decoded {
+    /// The longer side of a frame: its layer's native size.
     pub side: u32,
+    /// Each frame's width and height; `frames` are this size, not squared to `side`, until
+    /// `Sprites::finish` knows the layers' size.
+    pub frame_size: [u32; 2],
     pub frames: Vec<Vec<u8>>,
     /// The `.mcmeta` `animation` value, as text.
     pub animation: Option<String>,
@@ -83,6 +87,8 @@ fn serialize(fingerprint: u64, entries: &HashMap<String, Decoded>) -> Vec<u8> {
     for (name, d) in entries {
         put_bytes(&mut out, name.as_bytes());
         out.extend_from_slice(&d.side.to_le_bytes());
+        out.extend_from_slice(&d.frame_size[0].to_le_bytes());
+        out.extend_from_slice(&d.frame_size[1].to_le_bytes());
         out.extend_from_slice(&(d.frames.len() as u32).to_le_bytes());
         for frame in &d.frames {
             put_bytes(&mut out, frame);
@@ -130,6 +136,7 @@ fn parse(bytes: &[u8], fingerprint: u64) -> Option<HashMap<String, Decoded>> {
     for _ in 0..count {
         let name = String::from_utf8(r.bytes()?.to_vec()).ok()?;
         let side = r.u32()?;
+        let frame_size = [r.u32()?, r.u32()?];
         let frame_count = r.u32()?;
         let mut frames = Vec::new();
         for _ in 0..frame_count {
@@ -147,14 +154,20 @@ fn parse(bytes: &[u8], fingerprint: u64) -> Option<HashMap<String, Decoded>> {
         };
         let alpha_cutoff_bias = f32::from_bits(r.u32()?);
         let flags = r.take(1)?[0];
-        let frame_len = (side as usize).checked_mul(side as usize)?.checked_mul(4)?;
-        if frames.is_empty() || frames.iter().any(|f| f.len() != frame_len) {
+        let frame_len = (frame_size[0] as usize)
+            .checked_mul(frame_size[1] as usize)?
+            .checked_mul(4)?;
+        if frames.is_empty()
+            || frame_size[0].max(frame_size[1]) != side
+            || frames.iter().any(|f| f.len() != frame_len)
+        {
             return None;
         }
         entries.insert(
             name,
             Decoded {
                 side,
+                frame_size,
                 frames,
                 animation: has_animation.then_some(animation),
                 strategy,
@@ -176,6 +189,7 @@ mod tests {
     fn sample(blue: u8, animation: Option<&str>) -> Decoded {
         Decoded {
             side: 2,
+            frame_size: [2, 2],
             frames: vec![vec![blue; 16], vec![blue + 1; 16]],
             animation: animation.map(str::to_owned),
             strategy: Strategy::Cutout,
@@ -201,8 +215,8 @@ mod tests {
         for (name, d) in &entries {
             let e = &back[name];
             assert_eq!(
-                (d.side, &d.frames, &d.animation),
-                (e.side, &e.frames, &e.animation)
+                (d.side, d.frame_size, &d.frames, &d.animation),
+                (e.side, e.frame_size, &e.frames, &e.animation)
             );
             assert_eq!(d.alpha_cutoff_bias, e.alpha_cutoff_bias);
             assert_eq!(
