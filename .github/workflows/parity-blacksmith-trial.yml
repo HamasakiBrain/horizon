@@ -18,7 +18,8 @@ env:
   CARGO_TERM_COLOR: never
   DATASET: 26.3-linux-x64
   # The probe build folder is cached in the clear only once the differential check found no game content in it.
-  SAVE_CLEAR_TARGET: "false"
+  # Run 44636587982 found none (the control build differs in the same 108 files).
+  SAVE_CLEAR_TARGET: "true"
 
 jobs:
   # Does a probe build hold anything made from the vanilla data? The same probes, built at the same path twice from
@@ -26,6 +27,7 @@ jobs:
   # that differs is listed by name; and no file of the second build may be byte-identical to a file of the data or of
   # the prepared resources. Nothing is cached or uploaded.
   differential:
+    if: false # measured in runs 44630142730 and 44636587982
     runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 130
     steps:
@@ -658,6 +660,7 @@ jobs:
   # horizon-game compile again. The fix tried here, in this job's checkout only: the game's default features turn
   # horizon-client-lib's `default` on too (no code reads `feature = "default"`). Then both selections must be one build.
   game-features:
+    if: false # measured in run 44636587982
     runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 40
     steps:
