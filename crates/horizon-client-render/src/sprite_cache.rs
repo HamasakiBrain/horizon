@@ -158,6 +158,7 @@ fn parse(bytes: &[u8], fingerprint: u64) -> Option<HashMap<String, Decoded>> {
             .checked_mul(frame_size[1] as usize)?
             .checked_mul(4)?;
         if frames.is_empty()
+            || frame_size.contains(&0)
             || frame_size[0].max(frame_size[1]) != side
             || frames.iter().any(|f| f.len() != frame_len)
         {
@@ -238,6 +239,19 @@ mod tests {
         let mut extra = bytes.clone();
         extra.push(0);
         assert!(parse(&extra, 7).is_none());
+    }
+    /// A frame size with a zero side is a miss: its texture is decoded again, never read
+    /// from empty frames.
+    #[test]
+    fn a_zero_frame_side_is_a_miss() {
+        let entry = |frame_size: [u32; 2], frames: Vec<Vec<u8>>| {
+            let mut d = sample(1, None);
+            (d.side, d.frame_size, d.frames) = (16, frame_size, frames);
+            serialize(7, &HashMap::from([("a:b".to_owned(), d)]))
+        };
+        assert!(parse(&entry([0, 16], vec![vec![]]), 7).is_none());
+        let wide = parse(&entry([16, 2], vec![vec![5; 16 * 2 * 4]]), 7).unwrap();
+        assert_eq!(wide["a:b"].frame_size, [16, 2]);
     }
     #[test]
     fn changed_texture_invalidates_and_corrupt_file_is_ignored() {

@@ -14,6 +14,9 @@ pub struct SpriteAnimation {
     frames: Arc<Vec<Vec<u8>>>,
     clip: Arc<AnimationClip>,
     materials: [Option<Arc<Vec<Vec<u8>>>>; 2],
+    /// The frames' width and height while they are not square (before `Sprites::finish` makes
+    /// them its layers' size); `None` for square frames.
+    shape: Option<[u32; 2]>,
 }
 /// What an animated sprite shows: `frame`, mixed `millis` thousandths of the
 /// way towards `next` (0 for a single frame).
@@ -78,13 +81,22 @@ impl SpriteAnimation {
             }
         }
     }
+    /// A frame nearest-resampled to `width` x `height`. A frame that is not square yet reads as
+    /// its square (of its longer side) would: the texels the layer will hold.
     pub fn resized_pixels(&self, frame: usize, width: u32, height: u32) -> Vec<u8> {
         let source = self.pixels(frame);
-        let side = (source.len() / 4).isqrt() as u32;
-        let mut out = Vec::with_capacity((width * height * 4) as usize);
+        let [fw, fh] = self
+            .shape
+            .unwrap_or_else(|| [(source.len() / 4).isqrt() as u32; 2]);
+        let side = u64::from(fw.max(fh));
+        let pick = |i: u32, extent: u32, along: u32| {
+            u64::from(i) * side / u64::from(extent) * u64::from(along) / side
+        };
+        let mut out = Vec::with_capacity(width as usize * height as usize * 4);
         for y in 0..height {
+            let row = pick(y, height, fh) * u64::from(fw);
             for x in 0..width {
-                let offset = ((y * side / height * side + x * side / width) * 4) as usize;
+                let offset = ((row + pick(x, width, fw)) * 4) as usize;
                 out.extend_from_slice(&source[offset..offset + 4]);
             }
         }
@@ -309,13 +321,18 @@ impl Sprites {
             let clamp = |v: f32| (v.max(0.0) as usize).min(side);
             clamp((lo * side as f32).floor())..clamp((hi * side as f32).ceil())
         };
-        let (columns, rows) = (range(0), range(1));
+        // The frame's texels under the square's range: squaring repeats each, in order, so the
+        // range's ends map to the ends of a contiguous run, and each texel is read once.
+        let source = |r: std::ops::Range<usize>, extent: usize| match r.is_empty() {
+            true => 0..0,
+            false => r.start * extent / side..(r.end - 1) * extent / side + 1,
+        };
+        let (columns, rows) = (source(range(0), width), source(range(1), height));
         frames.iter().all(|frame| {
             rows.clone().all(|y| {
-                // The texel of the frame's square, nearest-resampled from the frame.
                 columns
                     .clone()
-                    .all(|x| frame[(y * height / side * width + x * width / side) * 4 + 3] == 255)
+                    .all(|x| frame[(y * width + x) * 4 + 3] == 255)
             })
         })
     }
@@ -339,7 +356,8 @@ impl Sprites {
         let largest = self.native.iter().map(|n| n.0).max().unwrap_or(SPRITE_SIZE);
         self.minimum_size = self.native.iter().map(|n| n.0).min().unwrap_or(SPRITE_SIZE);
         let budget = TEXTURE_BUDGET.load(std::sync::atomic::Ordering::Relaxed);
-        let size = side_within(largest, layers, budget);
+        // No layer is larger than a full atlas side, whatever the budget.
+        let size = side_within(largest.min(crate::hud::MAX_ATLAS_SIZE), layers, budget);
         if pixels {
             log::info!(
                 "Horizon: block sprites: {layers} layers at {size} px (largest {largest} px, budget {} MiB)",
@@ -396,6 +414,7 @@ impl Sprites {
         self.animations.retain(|a| !stilled.contains(&a.layer));
         for animation in &mut self.animations {
             animation.frames = resized[animation.layer as usize].clone();
+            animation.shape = None;
         }
         self.size = size;
         self.normals.clear();
@@ -974,6 +993,7 @@ impl Sprites {
                 frames: frames.clone(),
                 clip: Arc::new(clip),
                 materials: [None, None],
+                shape: (frame_size != [side, side]).then_some(frame_size),
             });
         }
         self.mips.push(settings);
@@ -1112,6 +1132,7 @@ pub(crate) fn test_frames(layer: u32, frames: Vec<Vec<u8>>, metadata: &str) -> S
         clip: Arc::new(metadata.clip(frames.len() as u32).unwrap().unwrap()),
         frames: Arc::new(frames),
         materials: [None, None],
+        shape: None,
     }
 }
 
@@ -1880,6 +1901,7 @@ mod tests {
         let animation = SpriteAnimation {
             layer: 0,
             materials: [None, None],
+            shape: None,
             frames: Arc::new(vec![vec![], vec![], vec![]]),
             clip: Arc::new(AnimationMetadata::from_json(r#"{"frames":[{"index":2,"time":8},{"index":1,"time":3},{"index":1,"time":2},0]}"#).unwrap().clip(3).unwrap().unwrap()),
         };
@@ -2097,6 +2119,41 @@ mod png_size_tests {
         assert!(decoded.frames.iter().all(|f| f.len() == 64 * 2 * 4));
         assert!(super::check_frames(512, 257).is_ok());
         assert!(super::check_frames(1024, 257).is_err());
+    }
+
+    /// An animated HUD sprite is read before `finish` squares its frames: it reads each
+    /// frame as its square would, and as it does once squared.
+    #[test]
+    fn a_frame_not_yet_square_resizes_as_its_square() {
+        let frame = pattern(4, 2);
+        let square = super::region_layer(&frame, 4, [0, 0, 4, 2], 4);
+        let mut wide = super::test_frames(0, vec![frame.clone(), frame], r#"{"frametime":1}"#);
+        let squared = super::test_frames(0, vec![square.clone(), square], r#"{"frametime":1}"#);
+        wide.shape = Some([4, 2]);
+        for (width, height) in [(4, 4), (8, 8), (3, 5), (16, 2)] {
+            assert_eq!(
+                wide.resized_pixels(1, width, height),
+                squared.resized_pixels(1, width, height),
+                "{width}x{height}"
+            );
+        }
+    }
+
+    /// Opacity under a quad reads the frame's own texels: a 4x1 frame whose last texel is
+    /// see-through is opaque under its left three quarters only.
+    #[test]
+    fn opacity_of_a_frame_not_yet_square() {
+        let mut frame = [9, 9, 9, 255].repeat(4);
+        frame[15] = 0;
+        let sprites = super::Sprites {
+            native: vec![(4, std::sync::Arc::new(vec![frame]), 0)],
+            shapes: std::collections::HashMap::from([(0, [4, 1])]),
+            opaque: vec![false],
+            ..Default::default()
+        };
+        let quad = |u: f32| [[0.0, 0.0], [u, 0.0], [u, 1.0], [0.0, 1.0]];
+        assert!(sprites.region_opaque(0, &quad(0.75)));
+        assert!(!sprites.region_opaque(0, &quad(1.0)));
     }
 
     /// An animation whose frames at the layers' size would pass a full atlas keeps its first
