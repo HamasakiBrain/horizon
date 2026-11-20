@@ -114,6 +114,8 @@ LAUNCHER_PATHS = [
     # (launcher/build.rs, src/desktop.rs, packaging/linux/appimage.sh).
     "packaging/icons/",
     "packaging/linux/",
+    # launcher.yml's macOS build packages Horizon.app and the .dmg with packaging/macos/package.sh.
+    "packaging/macos/",
 ]
 # What counts toward a launcher release (player_facing). Deliberately narrower than LAUNCHER_PATHS: the checks must see
 # every crate the launcher compiles, but a release for each change to the other 26 (horizon-world, horizon-core...)
@@ -135,6 +137,8 @@ LAUNCHER_RELEASE_PATHS = [
     # (launcher/build.rs, src/desktop.rs, packaging/linux/appimage.sh).
     "packaging/icons/",
     "packaging/linux/",
+    # launcher.yml's macOS build packages Horizon.app and the .dmg with packaging/macos/package.sh.
+    "packaging/macos/",
 ]
 LAUNCHER_IGNORED = ["launcher/links.json", "launcher/docs/", "launcher/tests/"]
 

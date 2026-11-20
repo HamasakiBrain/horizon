@@ -65,6 +65,7 @@ on:
       - 'crates/horizon-world/**'
       - 'packaging/icons/**'
       - 'packaging/linux/**'
+      - 'packaging/macos/**'
       - '.github/workflows/launcher.yml'
   schedule:
     - cron: '7-59/10 * * * *'

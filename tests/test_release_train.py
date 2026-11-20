@@ -185,6 +185,7 @@ class ReleaseTrainTests(unittest.TestCase):
             "crates/horizon-theme/",
             "packaging/icons/",
             "packaging/linux/",
+            "packaging/macos/",
         ])
         self.assertFalse(train.player_facing("crates/horizon-world/src/lib.rs", "launcher"))
 
