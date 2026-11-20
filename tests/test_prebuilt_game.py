@@ -431,6 +431,41 @@ class SdkAssetTests(unittest.TestCase):
                 legs / "sdk-linux-client/engine-x86_64-unknown-linux-gnu.tar.xz", leg))
             refused("no build-data.tar.xz", lambda leg: (leg / "build-data.tar.xz").unlink())
 
+    def test_pack_exports_the_surface_with_the_tool_staging_built(self):
+        # Staging builds horizon-stage in <target>/prebuilt/tools: the surface export runs that binary, and builds one
+        # in the same place only when staging left none, never a second copy in <target>/release.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "cargo-target"
+            # Linux's name: the platform is Linux below.
+            tool = target / "prebuilt" / "tools" / "release" / "horizon-stage"
+            for staged in (False, True):
+                with self.subTest(staged=staged):
+                    dist = root / f"dist-{staged}"
+                    out = self.out(root, 1000)
+                    if staged:
+                        tool.parent.mkdir(parents=True)
+                        tool.write_bytes(b"")
+                    calls = []
+
+                    def run(command, **kwargs):
+                        calls.append((command, kwargs))
+                        (dist / "surface.json").write_text("{}")
+
+                    with patch.object(prebuilt_game, "head", return_value=COMMIT),                             patch.object(prebuilt_game, "run", side_effect=run),                             patch.dict(os.environ, {"CARGO_TARGET_DIR": str(target)}),                             patch.object(sys, "platform", "linux"):
+                        prebuilt_game.pack(out, dist)
+                    [(command, kwargs)] = calls
+                    surface = ["surface", str(prebuilt_game.ROOT), str(dist / "surface.json")]
+                    if staged:
+                        self.assertEqual(command, [str(tool.resolve()), *surface])
+                        self.assertIsNone(kwargs["env"])
+                    else:
+                        self.assertEqual(command, ["cargo", "run", "--locked", "--release", "-q", "-p",
+                                                   "horizon-mod-api-gen", "--bin", "horizon-stage", "--", *surface])
+                        self.assertEqual(kwargs["env"]["CARGO_TARGET_DIR"],
+                                         str((target / "prebuilt" / "tools").resolve()))
+                    shutil.rmtree(out)
+
     def test_pack_refuses_another_commits_package(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

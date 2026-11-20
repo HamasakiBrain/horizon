@@ -219,6 +219,9 @@ The mod SDK of a Nightly is built inside `nightly build`, for the exact main com
    All four legs must pass: Linux client and server, Windows GNU client and macOS ARM64 client. Each builds two
    native starter mods against the SDK alone, starts their installed executable, and checks Windows export capacity.
    A live run can reuse an existing SDK only after its complete inventory and signed index are authenticated.
+   Each leg logs its runner's cores and memory and uploads `sdk-timings-<leg>` (3 days), the `cargo rustc --timings`
+   report of its SDK build, apart from the SDK's own artifact. The surface export reuses the `horizon-stage` that
+   staging built (`target/prebuilt/tools`).
 2. After the game build (including its smoke test), `sdk-publish.yml` gathers identical build data and surfaces,
    builds the generated API source, writes `sdk.json`, and checks every slice's commit, host, side, compiler,
    checksums and exact carried registry patches. Publication requires successful `checks` and `parity-main` push
