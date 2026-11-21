@@ -144,7 +144,7 @@ impl Game<'_> {
             return None;
         }
         let world = self.native_level_read_world(level)?;
-        let (environment, weather, day_time) =
+        let (environment, weather, _) =
             self.level_environment_in(world, Dim::from_id(level.dimension_id()));
         // `Mth.floor` of each coordinate, as the biome layer reads the position.
         let block = pos.map(|v| v.floor() as i32);
@@ -154,7 +154,9 @@ impl Game<'_> {
             Some(environment.biome(&info.name).unwrap_or(&info.attributes))
         };
         let id = attribute.strip_prefix("minecraft:").unwrap_or(attribute);
-        match environment.value_at(id, day_time, weather, map(false), map(true))? {
+        // Each timeline reads the clock it names, 0 for one the world has not met.
+        let clock = |name: &str| self.command_clock_time(name);
+        match environment.value_at(id, &clock, weather, map(false), map(true))? {
             horizon_world::environment_attributes::Value::Float(value) => Some(value),
             _ => None,
         }

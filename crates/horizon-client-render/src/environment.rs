@@ -1134,24 +1134,24 @@ impl Environment {
 
     /// `EnvironmentAttributeSystem.getValue(attribute, pos)` with no interpolator: the biome
     /// layer reads one biome, `full` for an attribute with full-resolution biomes
-    /// (`BiomeManager.getBiome`), `noise` for the others (`getNoiseBiomeAtPosition`).
+    /// (`BiomeManager.getBiome`), `noise` for the others (`getNoiseBiomeAtPosition`). Each
+    /// timeline track reads the clock it names through `clock` (`ClockManager.getTotalTicks`).
     pub fn value_at(
         &self,
         id: &str,
-        day_time: i64,
+        clock: &dyn Fn(&str) -> i64,
         weather: (f32, f32),
         noise: Option<&AttributeMap>,
         full: Option<&AttributeMap>,
     ) -> Option<Value> {
         let attribute = attribute(id)?;
         let biome = |full_resolution: bool| if full_resolution { full } else { noise };
-        let clock = |_clock: &str| day_time;
         let conditions = Conditions {
             rain: weather.0,
             thunder: weather.1,
             blend: None,
             biome: &biome,
-            clock: &clock,
+            clock,
             post_blend: None,
             post_biome: None,
         };
@@ -1260,7 +1260,7 @@ mod tests {
         let plains = environment.biome("minecraft:plains");
         let factor = |noise, full| match environment.value_at(
             "visual/sky_light_factor",
-            6000,
+            &|_| 6000,
             (0.0, 0.0),
             noise,
             full,
@@ -1274,9 +1274,33 @@ mod tests {
         assert_eq!(factor(None, plains), 0.5);
         assert!(
             environment
-                .value_at("visual/no_such_attribute", 0, (0.0, 0.0), None, None)
+                .value_at("visual/no_such_attribute", &|_| 0, (0.0, 0.0), None, None)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_value_at_a_position_reads_each_timeline_on_its_own_clock() {
+        use horizon_assets::resource_source::Resource;
+        let file = |json: &str| Resource::bytes(json.as_bytes().to_vec());
+        let source = ResourceSource::indexed(std::collections::BTreeMap::from([
+            (
+                "data/minecraft/dimension_type/overworld.json".into(),
+                file(r#"{"attributes":{},"timelines":["test:tide"]}"#),
+            ),
+            (
+                "data/test/timeline/tide.json".into(),
+                file(
+                    r#"{"clock":"test:tide","tracks":{"minecraft:visual/sky_light_factor":
+                    {"modifier":"multiply","keyframes":[{"ticks":0,"value":0.5},{"ticks":1000,"value":0.1}]}}}"#,
+                ),
+            ),
+        ]));
+        let environment = Environment::load(&source).unwrap();
+        // The tide clock is at 0 while the day clock is at 6000: the track reads its own clock.
+        let clock = |name: &str| if name == "test:tide" { 0 } else { 6000 };
+        let value = environment.value_at("visual/sky_light_factor", &clock, (0.0, 0.0), None, None);
+        assert_eq!(value, Some(Value::Float(0.5)));
     }
 
     fn overworld() -> Option<Environment> {
