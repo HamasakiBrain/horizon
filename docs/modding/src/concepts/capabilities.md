@@ -64,6 +64,9 @@ A declared container's stacks scatter when its block entity goes, as a vanilla c
 block entity that isn't a `Container` keeps its own (Mekanism's machines carry theirs in their item):
 the mod puts them in its drop from the entity's saved `Items` in `block_drops`, and a removal that
 drops nothing (a command, a replacing write) loses them, as in vanilla. It applies while its mod is on.
+One exception: a block entity that removes or replaces its own block during its own `block_entity_tick`
+is out of the level for that call, so `block_drops` sees an empty placeholder and the mod can't carry the
+stacks. The game scatters them then, as for any container, rather than lose them.
 
 One capability supports at most 65,535 providers per block or block entity type. The next registration
 is refused at load with a message naming the mod, capability and target and stating that the target
