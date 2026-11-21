@@ -1505,6 +1505,106 @@ mod tests {
             assert_eq!(out, [("minecraft:diamond".to_owned(), 3)]);
         });
     }
+    /// A block entity on a block that keeps its container's stacks replaces its own block during
+    /// its tick: a replacing write, which drops nothing, as for any kept block's removal that
+    /// drops nothing.
+    #[test]
+    #[ignore = "daily"]
+    fn a_kept_block_replaced_in_its_own_tick_drops_nothing() {
+        use horizon_client::chunk::Chunk;
+        use horizon_client::containers::{ModBlockEntity, ModBlockEntityFields, ModContainer};
+        use mod_api::HostBlockStates;
+        use std::sync::Arc;
+        /// With data `[1]`, it replaces its own block with granite.
+        struct Replacer(mod_api::BlockKey);
+        #[mod_api::horizon_part]
+        impl mod_api::BlockPart for Replacer {}
+        #[mod_api::horizon_part]
+        impl mod_api::BlockEntityPart for Replacer {
+            fn block_entity_tick(
+                &self,
+                host: &mut dyn mod_api::ServerHost,
+                event: &mut mod_api::BlockEntityTickEvent<'_>,
+            ) {
+                if event.entity.data == [1] {
+                    let level = host.level("minecraft:overworld").unwrap();
+                    let state = mod_api::BlockState::of(&host.block_states(), self.0, &[]).unwrap();
+                    let _ = level.set_block(
+                        host,
+                        event.pos,
+                        state,
+                        mod_api::BlockUpdateFlags::KNOWN_SHAPE,
+                    );
+                }
+            }
+        }
+        struct Keeper;
+        #[mod_api::__subscriptions]
+        impl mod_api::Hooks for Keeper {
+            fn register(&self, r: &mut dyn mod_api::Registrar, _: &mod_api::RegistrationContext) {
+                let press = r.block_key("test:press");
+                r.block_container_keeps_contents(&press);
+                let granite = r.block_key("minecraft:granite");
+                let kind = r
+                    .block_entity_type("replacer")
+                    .blocks(&["test:press"])
+                    .build();
+                r.block_entity_part(&kind, Replacer(granite)).unwrap();
+            }
+        }
+        let Some(root) = crate::game::native_entity_refs::tests::declared_part_root(
+            "game::spill::tests::a_kept_block_replaced_in_its_own_tick_drops_nothing",
+        ) else {
+            return;
+        };
+        let mods: mod_api::Mods = vec![mod_api::ModEntry::new("keeper", Box::new(Keeper))].into();
+        crate::game::api_values::install_parts(&mods).unwrap();
+        mod_platform::testing::with_mods(mods, || {
+            crate::game::native_entity_refs::tests::with_game_at(root, |game| {
+                game.options.dedicated = Some(Vec::new());
+                game.world
+                    .chunks
+                    .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+                let registry = &game.pack.assets.registry;
+                let press = registry.default_state("test:press").unwrap();
+                let granite = registry.default_state("minecraft:granite").unwrap();
+                let pos = BlockPos::new(1, 64, 2);
+                let key = (pos.x, pos.y, pos.z);
+                game.world.set(pos.x, pos.y, pos.z, press).unwrap();
+                game.world.block_entities.set_mod_containers(
+                    [(
+                        press.0,
+                        Arc::new(ModContainer {
+                            slots: 1,
+                            ..Default::default()
+                        }),
+                    )]
+                    .into_iter()
+                    .collect(),
+                );
+                game.world.block_entities.insert(
+                    key,
+                    BlockEntity::Mod(Box::new(ModBlockEntity::new(
+                        "keeper:replacer".into(),
+                        ModBlockEntityFields {
+                            items: vec![Some(ItemStack::new("minecraft:diamond", 3))],
+                            data: vec![1],
+                            ..Default::default()
+                        },
+                    ))),
+                );
+                let dropped = game.dropped.len();
+                game.tick_mod_block_entity(key);
+                assert_eq!(game.world.block(pos.x, pos.y, pos.z), granite);
+                assert_eq!(
+                    game.dropped.len(),
+                    dropped,
+                    "the kept stacks didn't scatter"
+                );
+            });
+        });
+    }
+
     use horizon_client::{block_entity_item, item_data, mobs::raider, save};
     use horizon_core::nbt::Tag;
 
