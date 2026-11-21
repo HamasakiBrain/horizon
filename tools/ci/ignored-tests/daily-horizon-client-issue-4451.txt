@@ -837,6 +837,7 @@ horizon-client game::lan_actions::hotbar_tests::a_hotbar_switch_fires_pre_then_p
 horizon-client game::lan_actions::item_on_block_cooldown_tests::actual_guest_placement_starts_its_cooldown lib daily resources
 horizon-client game::lan_actions::item_on_block_cooldown_tests::actual_guest_second_placement_is_rejected lib daily resources
 horizon-client game::lan_actions::item_on_block_cooldown_tests::failed_stick_use_keeps_group_available_for_placement lib daily resources
+horizon-client game::lan_actions::menu_result_take_tests::a_guests_take_reaches_the_part_after_the_machine_holds_what_it_left lib daily resources
 horizon-client game::lan_actions::menu_still_valid_tests::a_mod_menu_part_decides_whether_its_menu_stays_open lib daily resources
 horizon-client game::lan_actions::movement::collision_exclusion_wall_tests::a_block_in_a_players_exclusions_does_not_push_it_out lib daily resources
 horizon-client game::lan_actions::movement::collision_exclusion_wall_tests::a_block_in_a_players_exclusions_does_not_suffocate_it lib daily resources

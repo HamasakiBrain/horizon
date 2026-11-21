@@ -232,7 +232,9 @@ impl Game<'_> {
         load_player(menu, &host.hub.guests[gi]);
         menu.brewed_potion_hook = !mod_api::__private::mods().is_empty();
         menu.item_smelted_hook = menu.brewed_potion_hook;
-        menu.mod_result_hook = menu.brewed_potion_hook;
+        // Takes from a mod menu's result slots, only for a menu type a part listens on.
+        menu.mod_result_hook = matches!(menu.kind(), Kind::Mod(t)
+            if mod_api::__private::menu_listens(mod_api::HookId::MenuResultTake, t.id));
         let result = op(menu, &env);
         drop(parts);
         self.guest_bundle_sounds(gi, std::mem::take(&mut menu.player_sounds));
@@ -249,7 +251,6 @@ impl Game<'_> {
         let equipped = std::mem::take(&mut menu.equipped);
         let brewed = std::mem::take(&mut menu.brewed);
         let brewed_potion_takes = std::mem::take(&mut menu.brewed_potion_takes);
-        let mod_result_takes = std::mem::take(&mut menu.mod_result_takes);
         let crafted = std::mem::take(&mut menu.crafted);
         let item_crafted = std::mem::take(&mut menu.item_crafted);
         let crafted_counts = std::mem::take(&mut menu.crafted_counts);
@@ -260,11 +261,6 @@ impl Game<'_> {
             .update(gi, |guest| store_player(menu, guest));
         let guest = &host.hub.guests[gi];
         let (conn, uuid, entity_id) = (guest.conn, guest.uuid, guest.entity_id);
-        // The mod menu type and block a result slot's take is about.
-        let mod_menu = guest
-            .menu
-            .as_ref()
-            .and_then(|opened| Some((opened.mod_type?.id, opened.pos?)));
         // `ItemStack.onCraftedBy`'s `Stats.ITEM_CRAFTED` count, before the
         // recipe the take used.
         if !crafted_counts.is_empty() {
@@ -281,15 +277,6 @@ impl Game<'_> {
                 }
                 for stack in &brewed {
                     g.trigger_brewed_potion(stack);
-                }
-            });
-        }
-        if !mod_result_takes.is_empty()
-            && let Some((menu_type, (x, y, z))) = mod_menu
-        {
-            self.as_guest(conn, |g| {
-                for (slot, stack) in &mod_result_takes {
-                    g.native_menu_result_take(uuid, entity_id, menu_type, [x, y, z], *slot, stack);
                 }
             });
         }
@@ -654,6 +641,26 @@ impl Game<'_> {
             && !changed.contains(&slot)
         {
             changed.push(slot);
+        }
+        // `Slot.onTake` of a mod menu's result slot, once the block entity and its linked
+        // containers hold what the click left: a listener reads the machine after the take,
+        // and nothing of the click writes over what it changes.
+        let takes = std::mem::take(&mut menu.mod_result_takes);
+        if !takes.is_empty()
+            && let Some(menu_type) = mod_type.map(|t| t.id)
+        {
+            self.as_guest(conn, |g| {
+                for (slot, stack) in &takes {
+                    g.native_menu_result_take(
+                        uuid,
+                        entity_id,
+                        menu_type,
+                        [pos.0, pos.1, pos.2],
+                        *slot,
+                        stack,
+                    );
+                }
+            });
         }
         if let Some(host) = self.lan.as_mut() {
             *host.menus.entry(conn).or_default().crafting.machine = Some((p.container, menu));
