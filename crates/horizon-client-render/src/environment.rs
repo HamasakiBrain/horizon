@@ -1132,6 +1132,32 @@ impl Environment {
         }
     }
 
+    /// `EnvironmentAttributeSystem.getValue(attribute, pos)` with no interpolator: the biome
+    /// layer reads one biome, `full` for an attribute with full-resolution biomes
+    /// (`BiomeManager.getBiome`), `noise` for the others (`getNoiseBiomeAtPosition`).
+    pub fn value_at(
+        &self,
+        id: &str,
+        day_time: i64,
+        weather: (f32, f32),
+        noise: Option<&AttributeMap>,
+        full: Option<&AttributeMap>,
+    ) -> Option<Value> {
+        let attribute = attribute(id)?;
+        let biome = |full_resolution: bool| if full_resolution { full } else { noise };
+        let clock = |_clock: &str| day_time;
+        let conditions = Conditions {
+            rain: weather.0,
+            thunder: weather.1,
+            blend: None,
+            biome: &biome,
+            clock: &clock,
+            post_blend: None,
+            post_biome: None,
+        };
+        self.system.value(attribute, &conditions)
+    }
+
     /// The sky state the renderer draws.
     pub fn sample(&self, at: &Sample) -> Sky {
         let float = |id: &str| match self.value(id, at) {
@@ -1214,6 +1240,43 @@ mod tests {
             assert_eq!((15.0 - sky.sky_light_level) as i32, expected);
             assert!(Environment::load_dimension(&source, "missing").is_err());
         }
+    }
+
+    #[test]
+    fn a_value_at_a_position_reads_the_noise_biome_over_the_dimension() {
+        use horizon_assets::resource_source::Resource;
+        let file = |json: &str| Resource::bytes(json.as_bytes().to_vec());
+        let source = ResourceSource::indexed(std::collections::BTreeMap::from([
+            (
+                "data/minecraft/dimension_type/overworld.json".into(),
+                file(r#"{"attributes":{"minecraft:visual/sky_light_factor":0.5}}"#),
+            ),
+            (
+                "data/minecraft/worldgen/biome/plains.json".into(),
+                file(r#"{"attributes":{"minecraft:visual/sky_light_factor":0.25}}"#),
+            ),
+        ]));
+        let environment = Environment::load(&source).unwrap();
+        let plains = environment.biome("minecraft:plains");
+        let factor = |noise, full| match environment.value_at(
+            "visual/sky_light_factor",
+            6000,
+            (0.0, 0.0),
+            noise,
+            full,
+        ) {
+            Some(Value::Float(f)) => f,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(factor(plains, None), 0.25, "the noise biome's layer");
+        assert_eq!(factor(None, None), 0.5, "no biome: the dimension's value");
+        // Not a full-resolution attribute: the block's zoomed biome isn't read.
+        assert_eq!(factor(None, plains), 0.5);
+        assert!(
+            environment
+                .value_at("visual/no_such_attribute", 0, (0.0, 0.0), None, None)
+                .is_none()
+        );
     }
 
     fn overworld() -> Option<Environment> {
