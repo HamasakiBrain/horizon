@@ -343,6 +343,10 @@ impl Game<'_> {
         // A new RecipeBookComponent owns fresh ghost slots and an overlay,
         // even when the server replaces a menu without a close packet.
         self.recipe_ui.reset_screen();
+        // The server replaced the window: the container screen a mod's own
+        // screen was over is gone, and Escape must not bring it back (a
+        // lectern closes through its own path, never through this parent).
+        self.mod_screen_under = None;
         let menu = self
             .remote
             .as_ref()

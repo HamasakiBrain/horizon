@@ -426,6 +426,45 @@ mod client_screen_tests {
         });
     }
 
+    /// The server replaces the chest's window under a mod's screen with a
+    /// lectern, which closes through its own path: Escape afterwards goes to
+    /// the world, not back to the chest whose window the lectern replaced.
+    #[test]
+    #[ignore = "daily"]
+    fn a_lectern_replacing_the_window_forgets_the_chest_under_a_mod_screen() {
+        with_client_game(|game| {
+            let mut reader = logged_in(game);
+            chest_open(game, &mut reader);
+            assert!(game.show_mod_screen("emi"));
+            let lectern = game
+                .remote
+                .as_ref()
+                .unwrap()
+                .builtin
+                .get("minecraft:menu")
+                .unwrap()
+                .id("minecraft:lectern")
+                .unwrap();
+            game.handle_packet(C::OpenScreen(play::OpenScreen {
+                container: 8,
+                menu: lectern,
+                title: horizon_core::nbt::Tag::String("Lectern".into()),
+            }))
+            .unwrap();
+            game.handle_packet(C::ContainerClose(play::ContainerClose { container: 8 }))
+                .unwrap();
+            while game.close_screen() {
+                assert_ne!(
+                    game.screen,
+                    Screen::Inventory,
+                    "the replaced chest came back"
+                );
+            }
+            assert_eq!(game.screen, Screen::Playing);
+            assert_eq!(game.mod_screen(), None);
+        });
+    }
+
     /// A mod that keeps its own screen open (`screen_opening` cancels leaving
     /// it) while `keep` is set.
     struct Keeper {

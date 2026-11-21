@@ -7,8 +7,9 @@ impl Game<'_> {
     /// The id of the item in the slot under the pointer on the open container screen
     /// (`AbstractContainerScreen.getHoveredSlot().getItem()`), None over no slot or an empty one.
     pub(in crate::game) fn screen_hovered_item(&self) -> Option<mod_api::ItemKey> {
-        if self.screen == Screen::Mod {
-            // A mod's own screen has no slots, even over a container screen.
+        if self.mod_screen_under().is_some() {
+            // A mod's own screen over a container screen (`mod_screen_open_over_container`)
+            // hides that screen's slots: the pointer is over the mod's screen, not a slot.
             return None;
         }
         let size = self
