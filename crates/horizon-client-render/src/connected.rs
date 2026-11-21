@@ -70,6 +70,9 @@ struct OverlayJoin {
     states: Vec<u32>,
     tiles: Vec<u16>,
     tint: Option<(i32, Option<u32>)>,
+    /// `horizon.connectBlocks` is set: its list replaces `connect` even when none of the
+    /// blocks it names is loaded (then the rule joins nothing).
+    listed: bool,
 }
 
 impl OverlayJoin {
@@ -289,6 +292,7 @@ impl ConnectedTextures {
             .filter(|r| !r.rule.horizon_connect_blocks.is_empty())
         {
             r.overlay.states = resolve(&r.rule.horizon_connect_blocks);
+            r.overlay.listed = true;
         }
         for r in out.rules.iter_mut().filter(|r| r.rule.method.is_overlay()) {
             let rule = &r.rule;
@@ -591,7 +595,7 @@ impl ConnectedTextures {
         let join = &r.overlay;
         let joins = |offset: [i32; 3]| {
             let other = neighbour(offset);
-            if join.any() {
+            if join.listed || join.any() {
                 // An overlay joins the blocks it is drawn beside; another method the blocks
                 // `horizon.connectBlocks` lists.
                 return join.states.binary_search(&other).is_ok()
@@ -1213,6 +1217,12 @@ mod tests {
             pick_in(&only_stone, 1, 3, Face::North, &west(2)),
             tile(1001)
         );
+        // A list naming only blocks that aren't loaded joins nothing, not `connect=block`.
+        let absent = world(&[(
+            "glass.properties",
+            "matchBlocks=glass\nmethod=ctm\ntiles=0-46\nhorizon.connectBlocks=nomod:frame",
+        )]);
+        assert_eq!(pick_in(&absent, 1, 3, Face::North, &west(1)), tile(1000));
     }
 
     #[test]
