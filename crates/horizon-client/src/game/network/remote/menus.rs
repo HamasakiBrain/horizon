@@ -343,10 +343,6 @@ impl Game<'_> {
         // A new RecipeBookComponent owns fresh ghost slots and an overlay,
         // even when the server replaces a menu without a close packet.
         self.recipe_ui.reset_screen();
-        // The server replaced the window: the container screen a mod's own
-        // screen was over is gone, and Escape must not bring it back (a
-        // lectern closes through its own path, never through this parent).
-        self.mod_screen_under = None;
         let menu = self
             .remote
             .as_ref()
@@ -379,12 +375,17 @@ impl Game<'_> {
                 r.menu.set(Some((p.container, menu)));
                 r.set_menu_title(None);
             }
+            // A window the server replaced is gone: Escape must not bring back
+            // the container screen a mod's screen was over (a lectern closes
+            // through its own path, never through that parent).
+            self.mod_screen_under = None;
             self.remote_open_lectern(target.unwrap_or_default());
             return;
         }
         if let Some(kind) = Self::remote_station_kind(&menu) {
             let title = menu_title(&p.title);
             let pos = target.map_or([0, 0, 0], |t| [t.0, t.1, t.2]);
+            self.mod_screen_under = None;
             self.remote_open_station(p.container, menu, kind, title, pos);
             return;
         }
@@ -398,6 +399,7 @@ impl Game<'_> {
                     .map(|r| r.lang.clone())
                     .unwrap_or_default(),
             );
+            self.mod_screen_under = None;
             self.remote_open_merchant(p.container, title, menu_title(&p.title));
             return;
         }
@@ -461,6 +463,9 @@ impl Game<'_> {
                 return;
             }
         };
+        // Accepted: the new window replaces the one a mod's screen was over. A
+        // rejected one above keeps that parent, so the rejection closes both.
+        self.mod_screen_under = None;
         let title = menu_title(&p.title);
         if let Some(r) = self.remote.as_mut() {
             r.menu.set(Some((p.container, menu.clone())));

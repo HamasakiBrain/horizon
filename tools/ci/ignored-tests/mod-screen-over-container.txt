@@ -3,6 +3,7 @@ horizon-client game::native_client_screens::client_screen_tests::a_kept_mod_scre
 horizon-client game::native_client_screens::client_screen_tests::a_lectern_replacing_the_window_forgets_the_chest_under_a_mod_screen lib daily resources
 horizon-client game::native_client_screens::client_screen_tests::a_mod_screen_over_a_chest_keeps_its_menu_and_returns_to_it lib daily resources
 horizon-client game::native_client_screens::client_screen_tests::a_rejected_menu_closes_the_mod_screen_over_the_chest lib daily resources
+horizon-client game::native_client_screens::client_screen_tests::an_unsupported_window_over_a_covered_chest_closes_the_mod_screen_too lib daily resources
 horizon-client game::native_client_screens::client_screen_tests::the_servers_close_of_the_menu_under_a_mod_screen_closes_both lib daily resources
 horizon-client game::native_guest_turn_tests::a_guests_turn_keeps_the_container_under_the_hosts_mod_screen lib daily resources
 horizon-client game::native_hooks::tests::container_data_under_a_mod_screen_reaches_the_covered_screen lib daily resources

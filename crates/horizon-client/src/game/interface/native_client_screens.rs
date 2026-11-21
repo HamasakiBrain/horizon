@@ -426,6 +426,28 @@ mod client_screen_tests {
         });
     }
 
+    /// A window the server opens that the client can't show (an unknown menu)
+    /// while a mod's screen covers a chest is rejected, and the rejection
+    /// closes the mod's screen and the chest's screen with it.
+    #[test]
+    #[ignore = "daily"]
+    fn an_unsupported_window_over_a_covered_chest_closes_the_mod_screen_too() {
+        with_client_game(|game| {
+            let mut reader = logged_in(game);
+            chest_open(game, &mut reader);
+            assert!(game.show_mod_screen("emi"));
+            game.handle_packet(C::OpenScreen(play::OpenScreen {
+                container: 8,
+                menu: 9999,
+                title: horizon_core::nbt::Tag::String("?".into()),
+            }))
+            .unwrap();
+            assert_eq!(game.screen, Screen::Playing);
+            assert_eq!(game.mod_screen(), None);
+            assert_eq!(game.remote_menu_id(), 0, "the client menu is closed");
+        });
+    }
+
     /// The server replaces the chest's window under a mod's screen with a
     /// lectern, which closes through its own path: Escape afterwards goes to
     /// the world, not back to the chest whose window the lectern replaced.
