@@ -293,6 +293,34 @@ class CompareTests(unittest.TestCase):
                 status, _ = self.run_compare(base, {**head, "hook-notes.md": notes}, allow_added=True)
                 self.assertEqual(status, 1)
 
+    def test_part_method_addition_preserves_existing_guest_dispatch(self):
+        # A new part method (a MenuPart hook) takes its arm and its record number like a global hook does.
+        old_hook = {"name": "existing", "neoforge": "existing event"}
+        new_hook = {"name": "added", "neoforge": "none"}
+        part = 'crate::wire::guest::handler::<dyn crate :: MenuPart>(input.take()?)?'
+        old_arm = (f'12 => {{ let receiver = {part}; let p = crate::__wire_record_52(value);\n'
+                   ' let answer = receiver.existing(&p); out.put_owned(answer); }\n')
+        new_arm = (f'27 => {{ let receiver = {part}; let p = crate::__wire_record_52(value);\n'
+                   ' let answer = receiver.added(&mut host, &mut p); out.put_owned(answer); }\n')
+        old_name = 'crate::HookId::Existing => "existing",'
+        new_name = 'crate::HookId::Added => "added",'
+        fallback = '_ => return Err(crate::wire::WireError::Tag(id)) }\n'
+        base = {"catalog.json": json.dumps({"hooks": [old_hook]}), "hook-notes.md": NOTES,
+                "wire_guest_generated.rs": old_name + "\n" + old_arm + fallback}
+        head = {"catalog.json": json.dumps({"hooks": [new_hook, old_hook]}),
+                "hook-notes.md": NOTES.replace("## Existing", "## Added\n\nNew.\n\n## Existing"),
+                "wire_guest_generated.rs": new_name + old_name + "\n" + new_arm
+                + old_arm.replace("_52", "_53") + fallback}
+        for allowed in (True, False):
+            with self.subTest(allow_added=allowed):
+                status, text = self.run_compare(base, head, allow_added=allowed)
+                self.assertEqual(status, 0 if allowed else 1, text)
+        # The existing part method's arm still has to match.
+        modified = {**head, "wire_guest_generated.rs":
+                    head["wire_guest_generated.rs"].replace("receiver.existing(&p)", "receiver.existing(&other)")}
+        status, _ = self.run_compare(base, modified, allow_added=True)
+        self.assertEqual(status, 1)
+
     def guest_dispatch(self, records, added=None, added_name=False):
         """A guest wire around the arms of #18539's log: `records` numbers the preceding arm, effect_particle_modification,
         and enchantment_level_set's nested and outer record; `added` is an arm put after the first."""
