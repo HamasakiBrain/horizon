@@ -214,6 +214,10 @@ fn queried_context_and_ability_reach_native_adapter() {
         }
         let enchanted = json!({"type":"minecraft:match_tool","predicate":{"items":"minecraft:shears","predicates":{"minecraft:enchantments":[{"enchantments":"minecraft:silk_touch"}]}}});
         assert_eq!(drops_with(enchanted), 0, "{tool:?}");
+        // vanilla's `minecraft:tool/can_silk_touch`: a one-key predicate without items, asked
+        // when the shears check fails (leaves broken without shears)
+        let silk = json!({"type":"minecraft:match_tool","predicate":{"predicates":{"minecraft:enchantments":[{"enchantments":"minecraft:silk_touch","levels":{"min":1}}]}}});
+        assert_eq!(drops_with(silk), 0, "{tool:?}");
         assert_eq!(OBSERVED_ABILITY.with(|v| v.take()), None);
     }
     let empty_shears = ItemStack {

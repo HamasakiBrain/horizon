@@ -157,7 +157,7 @@ mod tests;
 /// Whether `c` is vanilla's `HAS_SHEARS`: a `match_tool` whose whole predicate is the shears.
 fn is_has_shears(c: &Value) -> bool {
     c["type"].as_str() == Some("minecraft:match_tool")
-        && c["predicate"]
-            .as_object()
-            .is_some_and(|p| p.len() == 1 && p["items"].as_str() == Some("minecraft:shears"))
+        && c["predicate"].as_object().is_some_and(|p| {
+            p.len() == 1 && p.get("items").and_then(Value::as_str) == Some("minecraft:shears")
+        })
 }
