@@ -8,11 +8,13 @@ use super::native_world_request::TitleState;
 use super::*;
 use mod_api::{NativeTitleResult, TitleRequest};
 
-/// The queue's decision, apart from the game: `title` where the title is, whether a world entry is already waiting
-/// for the world resources (`entering`), `granted` whether the caller may join a server (asked only for `Connect`,
-/// once the title and the queue allow a request), and the waiting request.
+/// The queue's decision, apart from the game: `title` where the title is, `on_title` whether any title screen is up
+/// with no world (where `MainPage` may go), whether a world entry is already waiting for the world resources
+/// (`entering`), `granted` whether the caller may join a server (asked only for `Connect`, once the title and the
+/// queue allow a request), and the waiting request.
 fn queue(
     title: TitleState,
+    on_title: bool,
     entering: bool,
     granted: impl FnOnce() -> bool,
     request: TitleRequest,
@@ -21,7 +23,11 @@ fn queue(
     if pending.is_some() || entering {
         return NativeTitleResult::Busy;
     }
-    if title != TitleState::Main {
+    let here = match request {
+        TitleRequest::MainPage => on_title,
+        _ => title == TitleState::Main,
+    };
+    if !here {
         return NativeTitleResult::NotTitle;
     }
     if let TitleRequest::Connect(address) = &request {
@@ -39,11 +45,13 @@ fn queue(
 impl Game<'_> {
     pub(in crate::game) fn request_title(&mut self, request: TitleRequest) -> NativeTitleResult {
         let title = self.title_state();
+        let on_title = self.on_title_screen();
         let entering = self.pending_entry.is_some();
         // The queue slot is taken out so the grant can read the game beside it.
         let mut pending = self.native_title_request.take();
         let answer = queue(
             title,
+            on_title,
             entering,
             || self.native_grant(|native| native.world_control).is_some(),
             request,
@@ -53,8 +61,14 @@ impl Game<'_> {
         answer
     }
 
+    /// A title screen is up (the main page or any other) with no world and no in-game screen over it.
+    fn on_title_screen(&self) -> bool {
+        self.title.is_some() && self.screen == Screen::Playing
+    }
+
     /// The title frame's turn for a queued request, run as the main page's button would run it. A request that
-    /// outlives the main page, or that meets a world entry already waiting for its resources, is dropped.
+    /// outlives the main page (for `MainPage`: the title), or that meets a world entry already waiting for its
+    /// resources, is dropped.
     pub(in crate::game) fn drain_native_title_request(
         &mut self,
         event_loop: &dyn EventLoopCtl,
@@ -62,7 +76,11 @@ impl Game<'_> {
         let Some(request) = self.native_title_request.take() else {
             return Ok(());
         };
-        if self.title_state() != TitleState::Main || self.pending_entry.is_some() {
+        let here = match request {
+            TitleRequest::MainPage => self.on_title_screen(),
+            _ => self.title_state() == TitleState::Main,
+        };
+        if !here || self.pending_entry.is_some() {
             return Ok(());
         }
         let Some(title) = self.title.as_mut() else {
@@ -85,6 +103,10 @@ impl Game<'_> {
             TitleRequest::Options => Some(horizon_client::title::Action::Options),
             TitleRequest::Mods => Some(horizon_client::title::Action::Mods),
             TitleRequest::Quit => Some(horizon_client::title::Action::Quit),
+            TitleRequest::MainPage => {
+                title.set_mode(horizon_client::title::Mode::Main);
+                None
+            }
             _ => None,
         };
         match action {
@@ -102,7 +124,14 @@ mod tests {
     fn only_the_main_page_queues_and_only_a_granted_mod_joins() {
         let mut pending = None;
         let ask = |title, entering, granted: bool, request, pending: &mut Option<TitleRequest>| {
-            queue(title, entering, || granted, request, pending)
+            queue(
+                title,
+                title == TitleState::Main,
+                entering,
+                || granted,
+                request,
+                pending,
+            )
         };
         // Off the main page, nothing is queued.
         assert_eq!(
@@ -160,6 +189,29 @@ mod tests {
             NativeTitleResult::Busy
         );
         assert_eq!(pending, Some(TitleRequest::CreateWorld));
+        // MainPage goes from any title screen (a disconnect screen, the server list), not from a world.
+        assert_eq!(
+            queue(
+                TitleState::Elsewhere,
+                true,
+                false,
+                || false,
+                TitleRequest::MainPage,
+                &mut None
+            ),
+            NativeTitleResult::Queued
+        );
+        assert_eq!(
+            queue(
+                TitleState::Elsewhere,
+                false,
+                false,
+                || false,
+                TitleRequest::MainPage,
+                &mut None
+            ),
+            NativeTitleResult::NotTitle
+        );
         // A world entry waiting for its resources keeps the queue shut.
         assert_eq!(
             ask(TitleState::Main, true, true, TitleRequest::Quit, &mut None),

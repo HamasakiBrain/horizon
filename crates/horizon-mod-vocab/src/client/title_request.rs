@@ -20,6 +20,9 @@ pub enum TitleRequest {
     Mods,
     /// Quit Game.
     Quit,
+    /// Back to the title's main page from any title screen (the server list, a disconnect screen, the world list),
+    /// as their Back or Done goes: for a mod that keeps its players on its own page.
+    MainPage,
 }
 
 /// What `request_title` answered: a code, never a message (no UI text).
@@ -29,7 +32,7 @@ pub enum TitleRequest {
 pub enum NativeTitleResult {
     /// Accepted: the title's next frame does it. Nothing happens inside the mod's call.
     Queued,
-    /// The title's main page is not up, or a world or another screen is.
+    /// The title's main page is not up, or a world or another screen is (for `MainPage`: no title screen is up).
     NotTitle,
     /// `Connect` from a mod whose own bundle does not declare `world_control` in its `[native]` section, or whose
     /// caller is unidentified; another enabled mod's declaration does not count.

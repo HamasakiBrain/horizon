@@ -83,7 +83,7 @@ refused with `NotPermitted`. Creating a world, and level create, unload or delet
 
 The same declaration lets a mod that draws its own title main page join a server from it: `request_title(Connect(address))`
 joins as Direct Connection's Join does. The page's other requests (`WorldList`, `CreateWorld`, `ServerList`, `Options`,
-`Mods`, `Quit`) are what any player can click on the title and need no permission. The call answers `NativeTitleResult`.
+`Mods`, `Quit`, `MainPage`) are what any player can click on the title and need no permission. The call answers `NativeTitleResult`.
 
 Set `level_reset` in the `[native]` section (default off) to let the mod regenerate the Overworld, the Nether and the End
 with `RuntimeLevels::reset_vanilla`:
