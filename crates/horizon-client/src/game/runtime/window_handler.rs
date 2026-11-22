@@ -378,6 +378,12 @@ impl Game<'_> {
             event_loop.exit();
             return;
         }
+        // A native mod's own title page asked for a button's work (`request_title`).
+        if let Err(error) = self.drain_native_title_request(event_loop) {
+            self.error = Some(error);
+            event_loop.exit();
+            return;
+        }
         // A Realm's address came back (GetServerDetailsTask hands over to ConnectScreen).
         if let Some(action) = self.title.as_mut().and_then(|t| t.take_connect_request())
             && let Err(error) = self.title_action(event_loop, action)
