@@ -84,6 +84,10 @@ HOST_IMPORT = re.compile(r'host_import!\("([^"]+)", \d+u32')
 
 # The guest implementation of an area trait begins on its own line and each forwarder occupies one line.
 GUEST_HOST_IMPL = re.compile(r"^impl (?:\w+\s*::\s*)*\w+ for Guest \{\n", re.MULTILINE)
+# A handler trait's two generated places: the line that turns the guest's `Arc<dyn Trait>` into a handler, and one
+# dispatch arm per method, beside the hooks' arms.
+GUEST_HANDLER_VIEW = re.compile(r"^if value\.is::<std::sync::Arc<dyn crate :: (\w+)>>\(\) \{.*\n", re.MULTILINE)
+GUEST_HANDLER_ARM = re.compile(r"\d+ => \{ let receiver = crate::wire::guest::handler::<dyn crate :: (\w+)>\(")
 
 
 def read_text(path, root_marks):
@@ -273,6 +277,26 @@ def guest_wire_without_calls(guest, base):
     return blank("".join(kept)), blank(base), added
 
 
+def guest_wire_without_handlers(guest, base):
+    """The head's guest wire with the handler traits it adds removed, and the names of those traits.
+
+    A handler is a mod's object the game calls back (`Arc<dyn Trait>`, `handler!` in the vocab); a mod hands one over
+    through a host call, so a trait the base has no handler line for comes with an added call, and the caller checks
+    that. Its view line and its methods' dispatch arms go; an existing trait's lines stay and have to match the base,
+    so a method added to or changed in an existing handler still fails. Each method's arm id is a hash of its name and
+    signature, not a position, so no other arm moves; the records an arm names go with it, and the caller compares the
+    retained records by rank, as for an added call."""
+    added = set(GUEST_HANDLER_VIEW.findall(guest)) - set(GUEST_HANDLER_VIEW.findall(base))
+    if not added:
+        return guest, added
+    guest = GUEST_HANDLER_VIEW.sub(lambda line: "" if line[1] in added else line[0], guest)
+    arms = [arm for arm in GUEST_ARM.finditer(guest, max(guest.find(GUEST_DISPATCH), 0))
+            if (handler := GUEST_HANDLER_ARM.match(arm[0])) and handler[1] in added]
+    for arm in reversed(arms):
+        guest = guest[:arm.start()] + guest[arm.end():]
+    return guest, added
+
+
 def records_in_order(guest):
     """The guest wire with each record number replaced by its rank among the file's record numbers.
 
@@ -292,9 +316,9 @@ def first_difference(head, base):
 
 
 def explained_additions(base_dir, head_dir, diffs, base_root, head_root):
-    """The catalog hooks and the host calls the head adds, when they explain every generated difference; two empty
-    sets when they don't."""
-    nothing = set(), set()
+    """The catalog hooks, the host calls and the handler traits the head adds, when they explain every generated
+    difference; three empty sets when they don't."""
+    nothing = set(), set(), set()
     changed = {name for name, _ in diffs}
     if not changed or changed - HOOK_FILES:
         return nothing
@@ -306,12 +330,15 @@ def explained_additions(base_dir, head_dir, diffs, base_root, head_root):
             read_text(base_dir / "hook-notes.md", [base_root] if base_root else []),
             read_text(head_dir / "hook-notes.md", [head_root] if head_root else []))):
         return nothing
-    calls = set()
+    calls, handlers = set(), set()
     if GUEST_WIRE in changed:
         base = read_text(base_dir / GUEST_WIRE, [base_root] if base_root else [])
         head = read_text(head_dir / GUEST_WIRE, [head_root] if head_root else [])
         head, base, calls = guest_wire_without_calls(head, base)
         if head is None:
+            return nothing
+        head, handlers = guest_wire_without_handlers(head, base)
+        if handlers and not calls:
             return nothing
         if hooks:
             explained = guest_wire_without_hooks(head, hooks, base, added_calls=bool(calls))
@@ -327,7 +354,7 @@ def explained_additions(base_dir, head_dir, diffs, base_root, head_root):
                 print(f"{GUEST_WIRE} differs after the added hooks and host calls, first at: "
                       + first_difference(explained, base)[:300])
             return nothing
-    return hooks, calls
+    return hooks, calls, handlers
 
 
 def internal_entries(text):
@@ -548,11 +575,14 @@ def compare(base_dir, head_dir, allow_added=False, base_root=None, head_root=Non
     explained = False
     # A new named hook or host call changes its generated files; nothing else may.
     if allow_added and not files_added and not files_removed:
-        hook_additions, call_additions = explained_additions(base_dir, head_dir, diffs, base_root, head_root)
+        hook_additions, call_additions, handler_additions = explained_additions(base_dir, head_dir, diffs, base_root,
+                                                                                head_root)
         if hook_additions:
             print("Catalog hooks added (accepted): " + ", ".join(sorted(hook_additions)))
         if call_additions:
             print("Host calls added (accepted): " + ", ".join(sorted(call_additions)))
+        if handler_additions:
+            print("Handler traits added with them (accepted): " + ", ".join(sorted(handler_additions)))
         explained = bool(hook_additions or call_additions)
     status = verdict(files_added, files_removed, diffs, explained, allow_added, internals, failing + ambiguous, stale)
     lines = summary(files_added, files_removed, diffs, internals=internals, accepted=accepted, stale=stale,

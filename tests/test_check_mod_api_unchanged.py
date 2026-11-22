@@ -379,6 +379,59 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(self.compare_hook_addition((859, 861, 864, 865), self.OWNED_ARM,
                                                     lambda text: source + text), 1)
 
+    @staticmethod
+    def handler_view(name):
+        return (f'if value.is::<std::sync::Arc<dyn crate :: {name}>>() {{ let value=*value.downcast::<std::sync::Arc<'
+                f'dyn crate :: {name}>>().map_err(|_|crate::wire::WireError::Invalid("wrong handler"))?; return Ok('
+                f'crate::wire::guest::add_handler(vec![crate::wire::guest::view::<dyn crate :: {name}>(value.clone())]'
+                f')); }}\n')
+
+    @staticmethod
+    def handler_arm(name, method="process"):
+        return (f'877632237 => {{ let receiver = crate::wire::guest::handler::<dyn crate :: {name}>(input.take()?)?; '
+                f'let p0: u32 = input.take()?;\nlet p1: Vec<u8> = input.take()?;\n let answer = receiver.{method}(p0, '
+                '&p1); out.put_owned(answer);  }\n')
+
+    def compare_handler_addition(self, head_view, head_arm, call=True):
+        """The gate's status for a head that adds dragon_fight_won with `head_view` and `head_arm` beside it, and with
+        a new host area's call that takes the handler when `call`; the base already has an `Existing` handler."""
+        fallback = "_ => return Err"
+        area = ('impl crate::SkinProcessors for Guest {\n'
+                'fn register(&mut self, p0: std::sync::Arc<dyn crate :: SkinProcessor>) { let r = host_import!('
+                '"SkinProcessors::register#ab", 5u32, w); }\n}\n') if call else ""
+
+        def edit(text):
+            text = area + self.handler_view("Existing") + head_view + text
+            return text.replace(fallback, head_arm + fallback, 1)
+
+        old_hook = {"name": "dimension_transition_screen_draw", "neoforge": "none"}
+        new_hook = {"name": "dragon_fight_won", "neoforge": "none"}
+        base = {"catalog.json": json.dumps({"hooks": [old_hook]}), "wire_guest_generated.rs":
+                self.handler_view("Existing") + self.guest_dispatch((857, 858, 862, 861))}
+        records = (859, 861, 865, 864) if call else (857, 859, 863, 862)
+        head = {"catalog.json": json.dumps({"hooks": [old_hook, new_hook]}),
+                "wire_guest_generated.rs": edit(self.guest_dispatch(records, self.OWNED_ARM, added_name=True))}
+        return self.run_compare(base, head, allow_added=True)
+
+    def test_an_added_handler_trait_with_the_call_that_takes_it_passes(self):
+        # register_skin_processors: SkinProcessors::register takes an `Arc<dyn SkinProcessor>`, which brings the
+        # trait's view line and its method's dispatch arm.
+        status, text = self.compare_handler_addition(self.handler_view("SkinProcessor"),
+                                                     self.handler_arm("SkinProcessor"))
+        self.assertEqual(status, 0, text)
+        self.assertIn("Handler traits added with them (accepted): SkinProcessor", text)
+
+    def test_a_handler_trait_without_an_added_call_or_an_existing_handler_changed_fails(self):
+        cases = {
+            "no added call hands it over": (self.handler_view("SkinProcessor"), self.handler_arm("SkinProcessor"),
+                                            False),
+            "a method added to an existing handler": ("", self.handler_arm("Existing"), True),
+            "an added handler's arm without its view line": ("", self.handler_arm("SkinProcessor"), True),
+        }
+        for case, (view, arm, call) in cases.items():
+            with self.subTest(case):
+                self.assertEqual(self.compare_handler_addition(view, arm, call)[0], 1)
+
     def test_a_changed_existing_arm_beside_an_added_hook_fails(self):
         cases = {
             "an existing arm's text": ((857, 859, 863, 862), lambda text: text.replace("out.put(&p1.visible);", "")),

@@ -605,6 +605,7 @@ pub(super) fn register_meshing(role: ExecutionRole) {
     register_color_resolvers(role);
     register_block_tint_sources(role);
     add_section_geometry(role);
+    register_skin_processors(role);
 }
 
 /// The native mods' colour resolvers (`native_register_color_resolvers`), kept once at start,
@@ -637,6 +638,16 @@ fn add_section_geometry(role: ExecutionRole) {
     let mut registry = mod_api::SectionGeometryRegistry::default();
     Game::native_add_section_geometry(&RegistrationContext::new(), &mut registry);
     horizon_client::mesher::register_section_geometry(registry.into_renderers());
+}
+/// The native mods' skin processors (`native_register_skin_processors`), kept once at start, before
+/// resources load; every skin the game refuses is offered to them.
+fn register_skin_processors(role: ExecutionRole) {
+    if !role.is_client() {
+        return;
+    }
+    let mut registry = mod_api::SkinProcessorRegistry::default();
+    Game::native_register_skin_processors(&RegistrationContext::new(), &mut registry);
+    horizon_client::skins::register_skin_processors(registry.into_processors());
 }
 /// The native mods' entity renderers (`native_register_entity_renderers`), kept once at start,
 /// before resources load; every resource load resolves each type's renderer.

@@ -621,8 +621,10 @@ fails when:
   the catalog and its own hook-notes sections (the other sections stay as they were); existing guest dispatch must match
   after accounting for the new hook and generated helper numbering. A new host call may add its own guest forwarder:
   a wasm guest links a call by its name and signature hash, so the position numbers of the imports after it may move,
-  and so may the record numbers of the types after one it brings in, as long as they keep their order. Every other
-  forwarder and the hook notes stay as they were.
+  and so may the record numbers of the types after one it brings in, as long as they keep their order. A handler trait
+  (a mod's object the game calls back, `Arc<dyn Trait>`) that an added call takes may add its own view line and its
+  methods' dispatch arms; an existing handler's stay as they were. Every other forwarder and the hook notes stay as
+  they were.
 
 The removal list is the only way an internal may go: one line per path, as `internals.json` writes it, then the issue
 (`horizon_mod_package::manifest::inject::Inject  #19576`). To retire some of a path's entries, name their kind, their

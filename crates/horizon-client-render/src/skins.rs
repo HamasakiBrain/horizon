@@ -1019,6 +1019,61 @@ pub fn lookup(
 /// `SkinTextureDownloader.processLegacySkin` on RGBA pixels: 64x32 skins
 /// get the 64x64 layout, and the opaque parts lose their alpha. `None` for
 /// any other size (the download fails).
+/// One mod's skin processor, and whether it has panicked (then it is asked no more).
+struct Processor {
+    processor: std::sync::Arc<dyn mod_api::SkinProcessor>,
+    failed: std::sync::atomic::AtomicBool,
+}
+
+/// The native mods' skin processors, in registration order: set once at start, before any skin
+/// downloads.
+static PROCESSORS: std::sync::OnceLock<Vec<Processor>> = std::sync::OnceLock::new();
+
+/// Sets the native mods' skin processors (`register_skin_processors`), once. False when already set.
+pub fn register_skin_processors(
+    processors: Vec<std::sync::Arc<dyn mod_api::SkinProcessor>>,
+) -> bool {
+    PROCESSORS
+        .set(
+            processors
+                .into_iter()
+                .map(|processor| Processor {
+                    processor,
+                    failed: Default::default(),
+                })
+                .collect(),
+        )
+        .is_ok()
+}
+
+/// A downloaded skin as the game shows it: vanilla's 64×64 or 64×32 (`process_legacy_skin`), else the
+/// first mod processor's 64×64 answer, taken as it is. None leaves the player in the default skin.
+pub fn process_skin(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
+    process_legacy_skin(width, height, rgba)
+        .or_else(|| processed(PROCESSORS.get()?, width, height, rgba))
+}
+
+/// The first answer of `processors` of the skin's 64×64 length; one that panics is asked no more.
+fn processed(processors: &[Processor], width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
+    use std::sync::atomic::Ordering;
+    processors.iter().find_map(|p| {
+        if p.failed.load(Ordering::Relaxed) {
+            return None;
+        }
+        let answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            p.processor.process(width, height, rgba)
+        }));
+        match answer {
+            Ok(image) => image.filter(|image| image.len() == 64 * 64 * 4),
+            Err(_) => {
+                log::warn!("a mod's skin processor panicked; it is asked no more");
+                p.failed.store(true, Ordering::Relaxed);
+                None
+            }
+        }
+    })
+}
+
 pub fn process_legacy_skin(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
     if width != 64 || height != 32 && height != 64 {
         return None;
@@ -1348,7 +1403,7 @@ impl Downloader {
         let decode = |bytes: &[u8]| -> Option<Vec<u8>> {
             let (w, h, rgba) = crate::hud::decode_bytes(bytes).ok()?;
             match kind {
-                Kind::Skin => process_legacy_skin(w, h, &rgba),
+                Kind::Skin => process_skin(w, h, &rgba),
                 Kind::Cape => process_cape(w, h, &rgba),
                 Kind::Elytra => Some(rgba),
             }
@@ -1398,7 +1453,7 @@ impl Downloader {
         }
         let (digest, process): (_, fn(u32, u32, &[u8]) -> Option<Vec<u8>>) =
             if let Some(digest) = location.strip_prefix("skins/") {
-                (digest, process_legacy_skin)
+                (digest, process_skin)
             } else if let Some(digest) = location.strip_prefix("capes/") {
                 (digest, process_cape)
             } else {
@@ -2772,5 +2827,53 @@ mod download_bound_tests {
             std::env::temp_dir(),
         ));
         assert!(d.resources.is_empty() && d.resource_order.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod processor_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    struct Answer(Option<usize>);
+    impl mod_api::SkinProcessor for Answer {
+        fn process(&self, _: u32, _: u32, _: &[u8]) -> Option<Vec<u8>> {
+            self.0.map(|len| vec![7u8; len])
+        }
+    }
+    struct Panics;
+    impl mod_api::SkinProcessor for Panics {
+        fn process(&self, _: u32, _: u32, _: &[u8]) -> Option<Vec<u8>> {
+            panic!("a broken processor")
+        }
+    }
+    fn processor(p: impl mod_api::SkinProcessor) -> Processor {
+        Processor {
+            processor: Arc::new(p),
+            failed: Default::default(),
+        }
+    }
+
+    /// A refused skin goes to the processors in order: an answer of another length is ignored, one
+    /// that panics is asked no more, and the first 64×64 answer is the skin.
+    #[test]
+    fn the_first_full_answer_wins_and_a_panicking_processor_is_dropped() {
+        let processors = [
+            processor(Answer(Some(10))),
+            processor(Panics),
+            processor(Answer(Some(64 * 64 * 4))),
+            processor(Answer(Some(64 * 64 * 4 + 4))),
+        ];
+        let hd = vec![0u8; 128 * 128 * 4];
+        let image = processed(&processors, 128, 128, &hd).unwrap();
+        assert_eq!(image.len(), 64 * 64 * 4);
+        assert!(
+            processors[1]
+                .failed
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+        assert!(processed(&processors[..2], 128, 128, &hd).is_none());
+        // a vanilla-sized skin never reaches them
+        assert!(process_skin(64, 64, &vec![0u8; 64 * 64 * 4]).is_some());
     }
 }
