@@ -19,6 +19,9 @@ component lines and advanced information. No attached part is needed for a
 global listener, so this is also how a mod edits vanilla or other mods' tooltips.
 The global event supplies the stack, display settings, player IDs, and the
 request's `advanced` and `creative` flags on native and wasm alike.
+Vanilla enchantment descriptions, including those on enchanted books, retain
+their root `TextContent::Translatable { key, .. }`. Match that key (for example,
+`enchantment.minecraft.sharpness`), not the displayed name, level, or color.
 
 ## Drawing a second world camera
 
@@ -31,7 +34,11 @@ views with distinct IDs are taken, with sides limited to 4096 pixels and the
 device limit, and 4 x 4096 x 4096 pixels in all. `push` refuses any other view
 with a `WorldViewRefusal` naming it and the reason, and logs each refusal once.
 Each view culls the world with its own frustum, and the player's view keeps its
-own culling. These callbacks have no Wire form.
+own culling. Entities and block entities are built for what the camera or any
+view sees; entity occlusion culling (the `entityCulling` setting) proves an entity
+hidden from the player's camera only, so it is off for a frame with views, and an
+entity behind a hill from the player still reaches a view that sees it. These
+callbacks have no Wire form.
 
 For a view seen in another view, such as a portal seen through a portal, push the
 outer view first and add `with_parent(outer_id)` to the inner one. Views nest up to
