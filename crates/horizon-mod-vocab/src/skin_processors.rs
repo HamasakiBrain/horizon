@@ -5,6 +5,7 @@
 //! shows the default skin. A mod's processor is asked for such a skin and may answer the 64×64
 //! RGBA the game's skin slot holds: a skin server's HD skins (128×128 to 1024×1024), say. It runs on
 //! the skin download workers, so it gets no `Host` and keeps no mutable state.
+use crate::wire::{Reader, Wire, WireError, Writer};
 use std::sync::Arc;
 
 /// A mod's processor for skins the game refuses.
@@ -15,6 +16,8 @@ pub trait SkinProcessor: Send + Sync + 'static {
     /// a processor that panics is asked no more.
     fn process(&self, width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>>;
 }
+
+crate::wire::wire_handlers::handler!(dyn SkinProcessor, "SkinProcessor");
 
 /// The processor registry `register_skin_processors` hands out.
 pub trait SkinProcessors {
