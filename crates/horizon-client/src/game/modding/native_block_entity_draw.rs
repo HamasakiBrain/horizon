@@ -870,6 +870,7 @@ impl Game<'_> {
             draw.kept = false;
             draw.spins.clear();
             draw.records.clear();
+            draw.glint = false;
             self.api_block_entity_submit(pos, block, id, entity, &mut draw);
             self.finish_prepared_draw(&mut draw, corner, camera);
             // The turning parts, from the start of this block's vertices.
