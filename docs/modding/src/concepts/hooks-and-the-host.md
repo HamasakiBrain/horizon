@@ -130,7 +130,8 @@ hooks can run on any loading thread; item default changes must be identical on e
 
 A few hooks do not run on the thread that ticks the world, and their docs say so. The mesher asks the
 `SectionGeometry`, colour resolver and tint source a mod registers (`add_section_geometry`, `register_color_resolvers`,
-`register_block_tint_sources`) on its worker threads. The worldgen Part methods (`alter_ground`, `rotate`,
+`register_block_tint_sources`) on its worker threads, and a `SkinProcessor` (`register_skin_processors`) runs on the
+skin download workers. The worldgen Part methods (`alter_ground`, `rotate`,
 `on_tree_grow`) run on the worldgen worker threads as well as the server thread, and `block_entity_update_tag` runs on
 another thread for a saved chunk sent past the view distance. These get no `Host` that writes, or none at all, so
 keep no mutable state in them that another thread could reach. The worldgen Part methods' `WorldgenHost` reads the

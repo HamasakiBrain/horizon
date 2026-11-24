@@ -1037,9 +1037,6 @@ pub fn lookup(
     skin
 }
 
-/// `SkinTextureDownloader.processLegacySkin` on RGBA pixels: 64x32 skins
-/// get the 64x64 layout, and the opaque parts lose their alpha. `None` for
-/// any other size (the download fails).
 /// One mod's skin processor, and whether it has panicked (then it is asked no more).
 struct Processor {
     processor: std::sync::Arc<dyn mod_api::SkinProcessor>,
@@ -1095,6 +1092,9 @@ fn processed(processors: &[Processor], width: u32, height: u32, rgba: &[u8]) -> 
     })
 }
 
+/// `SkinTextureDownloader.processLegacySkin` on RGBA pixels: 64x32 skins
+/// get the 64x64 layout, and the opaque parts lose their alpha. `None` for
+/// any other size (the download fails).
 pub fn process_legacy_skin(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
     if width != 64 || height != 32 && height != 64 {
         return None;
@@ -1397,11 +1397,19 @@ impl Downloader {
         let digest: String = skin_location(&key.1)["skins/".len()..].to_owned();
         let (url, send, root) = (url.to_owned(), self.send.clone(), self.root.clone());
         let fetch = self.fetch;
-        std::thread::spawn(move || {
-            let mut answer = Answer {
-                send,
-                key: Some(key),
-            };
+        let mut answer = Answer {
+            send,
+            key: Some(key),
+        };
+        // A mod's skin processor may be a wasm guest, which only a guest-sized stack may enter.
+        let guest = kind == Kind::Skin && PROCESSORS.get().is_some_and(|p| !p.is_empty());
+        let thread = if guest {
+            horizon_guest_stack::builder()
+        } else {
+            std::thread::Builder::new()
+        };
+        // A thread the OS refuses drops `answer`, which answers "failed".
+        let _ = thread.name("skin-download".into()).spawn(move || {
             let image = Self::load_texture(&root, kind, &digest, &url, fetch);
             answer.give(image);
         });
@@ -1472,11 +1480,11 @@ impl Downloader {
             self.queue(location.to_owned(), image);
             return true;
         }
-        let (digest, process): (_, fn(u32, u32, &[u8]) -> Option<Vec<u8>>) =
+        let (kind, digest, process): (_, _, fn(u32, u32, &[u8]) -> Option<Vec<u8>>) =
             if let Some(digest) = location.strip_prefix("skins/") {
-                (digest, process_skin)
+                (Kind::Skin, digest, process_skin)
             } else if let Some(digest) = location.strip_prefix("capes/") {
-                (digest, process_cape)
+                (Kind::Cape, digest, process_cape)
             } else {
                 return false;
             };
@@ -1489,10 +1497,32 @@ impl Downloader {
             process(w, h, &rgba)
         });
         let Some(image) = image else {
+            // A processor that took this skin refuses it now, or the cached body is gone: the next
+            // `state` loads it again on a worker and settles, where this would decode every frame.
+            self.forget(kind, location);
             return false;
         };
         self.queue(location.to_owned(), image);
         true
+    }
+    /// Drops the ready texture of `kind` drawn as `location`, so `state` loads it again.
+    fn forget(&mut self, kind: Kind, location: &str) {
+        let at = |key: &(Kind, String)| {
+            key.0 == kind
+                && location
+                    == match kind {
+                        Kind::Cape => cape_location(&key.1),
+                        Kind::Skin | Kind::Elytra => skin_location(&key.1),
+                    }
+        };
+        if let Some(i) = self
+            .state_order
+            .iter()
+            .position(|key| self.states.get(key) == Some(&Download::Ready) && at(key))
+            && let Some(key) = self.state_order.remove(i)
+        {
+            self.states.remove(&key);
+        }
     }
     /// Skins that finished since the last call: texture id and 64x64 RGBA.
     pub fn take_ready(&mut self) -> Vec<(String, Vec<u8>)> {
@@ -2288,6 +2318,12 @@ mod tests {
         d.queue("skins/def".into(), vec![4]);
         assert!(d.again("skins/def"));
         assert_eq!(d.take_ready(), vec![("skins/def".to_owned(), vec![4])]);
+        // A ready texture whose image can't be had again (a processor refuses it now) is dropped, so
+        // `state` loads it on a worker instead of `again` decoding it every frame.
+        let key = (super::Kind::Skin, "gone".to_owned());
+        d.set_state(key.clone(), super::Download::Ready);
+        assert!(!d.again(&super::skin_location("gone")));
+        assert!(!d.states.contains_key(&key) && !d.state_order.contains(&key));
     }
 
     /// A cape fills the top half of a 64x64 slot; a larger one is scaled to 64x32.
@@ -2895,6 +2931,42 @@ mod processor_tests {
             processor: Arc::new(p),
             failed: Default::default(),
         }
+    }
+
+    /// The download worker that asks a processor can enter a wasm guest.
+    #[test]
+    fn a_processor_is_asked_on_a_guest_sized_stack() {
+        struct Stack;
+        impl mod_api::SkinProcessor for Stack {
+            fn process(&self, _: u32, _: u32, _: &[u8]) -> Option<Vec<u8>> {
+                horizon_guest_stack::check_current()
+                    .is_ok()
+                    .then(|| vec![9u8; 64 * 64 * 4])
+            }
+        }
+        register_skin_processors(vec![Arc::new(Stack)]);
+        let root = std::env::temp_dir().join(format!("horizon-skin-stack-{}", std::process::id()));
+        let mut d = Downloader::new(root.clone());
+        d.fetch = |_| {
+            let mut png = Vec::new();
+            let mut encoder = png::Encoder::new(&mut png, 128, 128);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&[255; 128 * 128 * 4])
+                .unwrap();
+            Some(png)
+        };
+        let url = "https://textures.minecraft.net/texture/hd";
+        for _ in 0..500 {
+            if d.state(Kind::Skin, url) != Download::Pending {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(d.state(Kind::Skin, url), Download::Ready);
+        std::fs::remove_dir_all(root).ok();
     }
 
     /// A refused skin goes to the processors in order: an answer of another length is ignored, one
