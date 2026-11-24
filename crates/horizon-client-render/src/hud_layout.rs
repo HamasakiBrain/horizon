@@ -1111,12 +1111,11 @@ mod pose_tests {
     /// would push it) lays a fill's corners clockwise round that pivot on the screen.
     #[test]
     fn a_rotated_fill_turns_about_the_pivot() {
-        let atlas = crate::hud::HudAtlas::build(
-            &crate::resource_source::ResourceSource::directory(
+        let atlas =
+            crate::hud::HudAtlas::build(&crate::resource_source::ResourceSource::directory(
                 "/nonexistent/horizon-test-assets".into(),
-            ),
-        )
-        .unwrap();
+            ))
+            .unwrap();
         let mut batch = crate::hud::HudBatch::scratch([854, 480]);
         let draws = [
             GuiDraw::Push(vec![
