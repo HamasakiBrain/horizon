@@ -66,6 +66,26 @@ impl Game<'_> {
         self.title.is_some() && self.screen == Screen::Playing
     }
 
+    /// Whether `request` may still run where the title is: `MainPage` from any title screen, the rest on the main page.
+    fn title_request_here(&self, request: &TitleRequest) -> bool {
+        match request {
+            TitleRequest::MainPage => self.on_title_screen(),
+            _ => self.title_state() == TitleState::Main,
+        }
+    }
+
+    /// After each window event: a queued request whose page has closed is dropped, so leaving the main page and
+    /// coming back to it before the title's next frame does not run it on the new visit.
+    pub(in crate::game) fn forget_stale_native_title_request(&mut self) {
+        if self
+            .native_title_request
+            .as_ref()
+            .is_some_and(|request| !self.title_request_here(request))
+        {
+            self.native_title_request = None;
+        }
+    }
+
     /// The title frame's turn for a queued request, run as the main page's button would run it. A request that
     /// outlives the main page (for `MainPage`: the title), or that meets a world entry already waiting for its
     /// resources, is dropped.
@@ -76,11 +96,7 @@ impl Game<'_> {
         let Some(request) = self.native_title_request.take() else {
             return Ok(());
         };
-        let here = match request {
-            TitleRequest::MainPage => self.on_title_screen(),
-            _ => self.title_state() == TitleState::Main,
-        };
-        if !here || self.pending_entry.is_some() {
+        if !self.title_request_here(&request) || self.pending_entry.is_some() {
             return Ok(());
         }
         let Some(title) = self.title.as_mut() else {

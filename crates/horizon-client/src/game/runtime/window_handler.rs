@@ -169,6 +169,7 @@ impl Game<'_> {
         self.with_user_input(input, |game| {
             game.handle_window_event_as(event_loop, id, event, origin);
         });
+        self.forget_stale_native_title_request();
     }
 
     pub(super) fn handle_window_event_as(

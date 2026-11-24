@@ -30,4 +30,6 @@ fn a_join_is_direct_connections_and_keeps_the_address() {
         horizon_protocol::servers::load_all(&crate::multiplayer::servers_file(&f.title.saves));
     assert!(shown.is_empty());
     assert!(hidden.iter().any(|s| s.ip == "play.example.net:25566"));
+    // And Direct Connection opens on it next time.
+    assert_eq!(f.title.last_server, "play.example.net:25566");
 }

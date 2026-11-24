@@ -997,6 +997,8 @@ impl Title {
         if !horizon_protocol::servers::is_valid_address(address) {
             return None;
         }
+        // Direct Connection keeps what was typed for its next opening (`remember_direct_address`).
+        self.last_server = address.to_owned();
         let address = crate::multiplayer::direct_address(address);
         crate::multiplayer::remember_direct_join(&self.saves, &address);
         Some(Action::Connect {
