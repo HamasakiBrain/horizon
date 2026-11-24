@@ -138,8 +138,9 @@ impl Game<'_> {
 
     /// Writes `stack` over the same item in `target` as code editing the slot's own stack does:
     /// an equipment slot (`EntityEquipment.set`) plays no equip sound and posts no equip game
-    /// event, which are `setItemSlot`'s `onEquipItem`; armour's attribute modifiers follow, at
-    /// the root commit in a transaction. Any other slot is written as `slot_set` writes it.
+    /// event, which are `setItemSlot`'s `onEquipItem`; armour's and the offhand's attribute
+    /// modifiers follow, at the root commit in a transaction. Any other slot is written as
+    /// `slot_set` writes it.
     fn slot_set_in_place(&mut self, target: &Slot, stack: Option<ItemStack>) -> bool {
         match target {
             Slot::Armor(i) => {
@@ -148,16 +149,13 @@ impl Game<'_> {
                 }
                 let uuid = self.journaled_actor();
                 self.armor[*i] = stack;
-                if self.transactions.is_empty() {
-                    self.apply_equipment();
-                } else {
-                    self.after_commit(super::transactions::After::PlayerEquipment(uuid));
-                }
+                self.follow_equipment(uuid);
             }
             Slot::Offhand => {
-                self.journaled_actor();
+                let uuid = self.journaled_actor();
                 self.stop_use_replaced(crate::game::shield::OFFHAND_SLOT, stack.as_ref());
                 self.offhand = stack;
+                self.follow_equipment(uuid);
             }
             Slot::Equipment(i) => {
                 self.journaled_actor();
@@ -166,6 +164,16 @@ impl Game<'_> {
             other => return self.slot_set(other, stack),
         }
         true
+    }
+
+    /// The equipment attribute modifiers of player `uuid` follow a write in place: at once, or
+    /// at the root commit inside a transaction.
+    fn follow_equipment(&mut self, uuid: u128) {
+        if self.transactions.is_empty() {
+            self.apply_equipment();
+        } else {
+            self.after_commit(super::transactions::After::PlayerEquipment(uuid));
+        }
     }
 
     /// The acting player, journalled for the open transaction as `slot_set` does.

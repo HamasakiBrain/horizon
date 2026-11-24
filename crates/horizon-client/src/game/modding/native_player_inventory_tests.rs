@@ -343,5 +343,18 @@ fn an_update_in_place_is_silent_and_another_item_is_an_equip() {
         // diamond boots: 3 armour points
         assert_eq!(armor(game), Some(3.0));
         assert_eq!(game.audio.capture.as_ref().unwrap().len(), 1, "another item is an equip");
+        // The offhand (slot 40): the new stack's own armour modifier holds once updated in place.
+        let shard = |game: &super::Game<'_>, amount: u32| {
+            stack(
+                game,
+                &format!(
+                    r#"{{id:"minecraft:stick",count:1,components:{{"minecraft:attribute_modifiers":[{{type:"minecraft:armor",slot:"offhand",amount:{amount}.0d,id:"test:shard",operation:"add_value"}}]}}}}"#
+                ),
+            )
+        };
+        let (one, four) = (shard(game, 1), shard(game, 4));
+        assert_eq!(player.set_inventory_slot(game, 40, Some(one)), Ok(()));
+        assert_eq!(player.update_inventory_slot(game, 40, four), Ok(()));
+        assert_eq!(armor(game), Some(7.0));
     });
 }
