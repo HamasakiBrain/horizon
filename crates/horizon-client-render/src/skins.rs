@@ -192,6 +192,27 @@ pub fn unpack(value: &str, signature: Signature, valid_uris: &[impl AsRef<str>])
     out
 }
 
+/// A `textures` property's value for `textures`: the base64 JSON payload [`unpack`] reads
+/// back. It names only the texture URLs, no profile id or name, and carries no signature.
+pub fn pack(textures: &Textures) -> String {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let mut entries = serde_json::Map::new();
+    if let Some(url) = &textures.skin {
+        let mut skin = serde_json::json!({ "url": url });
+        if textures.slim {
+            skin["metadata"] = serde_json::json!({ "model": "slim" });
+        }
+        entries.insert("SKIN".into(), skin);
+    }
+    if let Some(url) = &textures.cape {
+        entries.insert("CAPE".into(), serde_json::json!({ "url": url }));
+    }
+    if let Some(url) = &textures.elytra {
+        entries.insert("ELYTRA".into(), serde_json::json!({ "url": url }));
+    }
+    STANDARD.encode(serde_json::json!({ "textures": entries }).to_string())
+}
+
 /// The skin URL of a `minecraft:profile` component's property list. Player
 /// heads and mannequins read their profile this way, and `SkinManager` lets
 /// those textures be unsigned (`getInsecureSkinInformation`).
@@ -1588,6 +1609,26 @@ pub fn sha1(data: &[u8]) -> [u8; 20] {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn packed_textures_unpack_to_themselves() {
+        let textures = super::Textures {
+            skin: Some("https://textures.minecraft.net/texture/skin1".into()),
+            slim: true,
+            cape: Some("https://textures.minecraft.net/texture/cape2".into()),
+            elytra: None,
+            signed: false,
+        };
+        let value = super::pack(&textures);
+        let back = super::unpack(&value, super::Signature::Unsigned, &super::TEXTURE_URIS);
+        assert_eq!(back, textures);
+        // No skin, no cape: nothing to name.
+        let none = super::pack(&super::Textures::default());
+        assert_eq!(
+            super::unpack(&none, super::Signature::Unsigned, &super::TEXTURE_URIS),
+            super::Textures::default()
+        );
+    }
+
+    #[test]
     fn an_invalid_name_is_answered_without_being_cached() {
         let mut resolver = super::Resolver::new();
         let key = super::NameOrId::Name("not a name!".into());
@@ -2834,6 +2875,7 @@ mod download_bound_tests {
 mod processor_tests {
     use super::*;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct Answer(Option<usize>);
     impl mod_api::SkinProcessor for Answer {
@@ -2841,9 +2883,10 @@ mod processor_tests {
             self.0.map(|len| vec![7u8; len])
         }
     }
-    struct Panics;
+    struct Panics(Arc<AtomicUsize>);
     impl mod_api::SkinProcessor for Panics {
         fn process(&self, _: u32, _: u32, _: &[u8]) -> Option<Vec<u8>> {
+            self.0.fetch_add(1, Ordering::Relaxed);
             panic!("a broken processor")
         }
     }
@@ -2858,21 +2901,20 @@ mod processor_tests {
     /// that panics is asked no more, and the first 64×64 answer is the skin.
     #[test]
     fn the_first_full_answer_wins_and_a_panicking_processor_is_dropped() {
+        let panicked = Arc::<AtomicUsize>::default();
         let processors = [
             processor(Answer(Some(10))),
-            processor(Panics),
+            processor(Panics(panicked.clone())),
             processor(Answer(Some(64 * 64 * 4))),
             processor(Answer(Some(64 * 64 * 4 + 4))),
         ];
         let hd = vec![0u8; 128 * 128 * 4];
         let image = processed(&processors, 128, 128, &hd).unwrap();
         assert_eq!(image.len(), 64 * 64 * 4);
-        assert!(
-            processors[1]
-                .failed
-                .load(std::sync::atomic::Ordering::Relaxed)
-        );
+        assert_eq!(panicked.load(Ordering::Relaxed), 1);
         assert!(processed(&processors[..2], 128, 128, &hd).is_none());
+        // the second skin was not offered to the one that panicked
+        assert_eq!(panicked.load(Ordering::Relaxed), 1);
         // a vanilla-sized skin never reaches them
         assert!(process_skin(64, 64, &vec![0u8; 64 * 64 * 4]).is_some());
     }
