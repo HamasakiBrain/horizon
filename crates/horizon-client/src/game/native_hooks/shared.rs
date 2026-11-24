@@ -4879,7 +4879,7 @@ mod tests {
                 layout_revision: 0,
                 key: (1, 2, 3),
                 window: 4,
-                block: "gtmod:machine".into(),
+                block: Some("gtmod:machine".into()),
                 screen: mod_api::Screen::default(),
                 data: Vec::new(),
                 extra: None,
